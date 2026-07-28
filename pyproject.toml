@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dhan-pipeline"
+version = "0.1.0"
+description = "Reusable Dhan -> BigQuery OHLCV pipeline with corporate-action (split) detection"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas",
+    "numpy",
+    "aiohttp",
+    "nest_asyncio",
+    "tqdm",
+    "requests",
+    "pytz",
+    "gspread",
+    "dhanhq",
+    "google-cloud-bigquery",
+    "pandas-gbq",
+    "google-auth",
+]
+
+[tool.setuptools.packages.find]
+include = ["dhan_pipeline*"]

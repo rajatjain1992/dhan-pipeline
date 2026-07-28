@@ -1,0 +1,21 @@
+# Secrets - never commit
+*.json
+!**/schema/*.json
+.env
+*.token
+
+# Data / outputs
+*.csv
+*.parquet
+scrip_master.csv
+mismatch_details.csv
+corporate_action_flags*.csv
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+.venv/
