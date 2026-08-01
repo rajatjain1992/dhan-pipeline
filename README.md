@@ -10,7 +10,7 @@ script — daily, intraday 1m/15m, options — is a thin caller.
 ## Install (Colab or local)
 
 ```bash
-pip install "git+https://github.com/<your-user>/dhan-pipeline.git"
+pip install "git+https://github.com/rajatjain1992/dhan-pipeline.git"
 ```
 
 ## Configure (env vars — nothing hardcoded)
