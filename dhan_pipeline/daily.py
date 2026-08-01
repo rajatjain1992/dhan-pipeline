@@ -1,12 +1,7 @@
-"""High-level daily flow: fetch last 2 days -> split-check 2nd-last day -> upsert.
+"""High-level daily flow: fetch a window -> split-check 2nd-last day -> upsert.
 
-This is the whole notebook cell condensed into one call. A script/notebook just:
-
-    cfg = Config(...)
-    result = run_daily(cfg)
-
-`run_daily` returns a dict with the fetched frame, the flags frame, failed
-scrips, and the upserted row count.
+This is the repeatable *process*. All variables (dates, scrip source, table
+names, creds) come from `cfg` and the arguments passed by the calling file.
 """
 from datetime import date, timedelta
 
@@ -19,35 +14,43 @@ from . import bq as bqmod
 from .splitcheck import split_dates, detect_corporate_actions
 
 
-def run_daily(cfg, scrip_mapping=None, from_date=None, to_date=None,
+def recent_window(days=4):
+    """Return (from_date, to_date) covering the last `days` calendar days.
+
+    A helper the calling file MAY use to get >= 2 trading days across a weekend/
+    holiday. The file stays in control of the dates — it can also hardcode them.
+    """
+    today = date.today()
+    return (today - timedelta(days=days)).isoformat(), today.isoformat()
+
+
+def run_daily(cfg, from_date, to_date, scrip_mapping=None,
               flags_csv="corporate_action_flags.csv", write_flags_to_bq=True):
     """Run the daily pipeline end to end.
 
-    - Fetches the last 2 calendar days by default (widen the window if a holiday
-      means only one trading day is returned).
-    - Compares the 2nd-last trading day against BigQuery to detect splits.
-    - Uploads the last day for all fetched scrips (cfg.upload_mismatched=True),
-      or only for matching scrips if you set cfg.upload_mismatched=False.
+    Args:
+        cfg: Config with all project values filled in by the caller.
+        from_date, to_date: window to fetch (ISO strings). Supply >= 2 trading
+            days so the 2nd-last day is available for the split check.
+        scrip_mapping: optional pre-loaded/subset mapping; if None it is loaded
+            from the Google Sheet in cfg.
     """
+    cfg.require("project_id", "dataset_id", "daily_table",
+                "dhan_client_id", "dhan_access_token")
+
     client = bq_client(cfg)
 
     if scrip_mapping is None:
         gc = gspread_client(cfg)
         scrip_mapping = load_scrip_mapping(cfg, gc)
 
-    # Default window: last 4 calendar days -> guarantees >= 2 trading days even
-    # across a weekend/holiday. We then key off the two most-recent dates found.
-    if to_date is None:
-        to_date = date.today().isoformat()
-    if from_date is None:
-        from_date = (date.today() - timedelta(days=4)).isoformat()
-
     fetched, failed = fetch_ohlcv(cfg, scrip_mapping, from_date, to_date)
-    print(f"Fetched {len(fetched)} rows across {fetched['scrip'].nunique() if not fetched.empty else 0} scrips.")
+    print(f"Fetched {len(fetched)} rows across "
+          f"{fetched['scrip'].nunique() if not fetched.empty else 0} scrips.")
 
     if fetched.empty:
-        return {"fetched": fetched, "flags": pd.DataFrame(), "failed": failed, "uploaded": 0,
-                "last_date": None, "check_date": None}
+        return {"fetched": fetched, "flags": pd.DataFrame(), "failed": failed,
+                "uploaded": 0, "last_date": None, "check_date": None}
 
     last_date, check_date = split_dates(fetched)
     print(f"last_date={last_date}  check_date={check_date}")
@@ -59,7 +62,8 @@ def run_daily(cfg, scrip_mapping=None, from_date=None, to_date=None,
         bq_check = bqmod.read_daily(cfg, client, scrips, check_date, check_date)
         flags = detect_corporate_actions(cfg, fetched, bq_check, check_date)
 
-    mismatch_scrips = sorted(flags[flags["reason"] == "mismatch"]["scrip"].unique()) if not flags.empty else []
+    mismatch_scrips = (sorted(flags[flags["reason"] == "mismatch"]["scrip"].unique())
+                       if not flags.empty else [])
     if mismatch_scrips:
         print(f"\n⚠️  {len(mismatch_scrips)} scrip(s) flagged (suspected split/adjustment): {mismatch_scrips}")
         if flags_csv:

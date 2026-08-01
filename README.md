@@ -13,29 +13,40 @@ script — daily, intraday 1m/15m, options — is a thin caller.
 pip install "git+https://github.com/rajatjain1992/dhan-pipeline.git"
 ```
 
-## Configure (env vars — nothing hardcoded)
+## The split: functions in git, variables in your file
 
-| Var | Meaning |
-|-----|---------|
-| `DHAN_CLIENT_ID` / `DHAN_ACCESS_TOKEN` | Dhan API creds |
-| `GOOGLE_APPLICATION_CREDENTIALS` | path to service-account JSON (Drive path on Colab) |
-| `DHAN_GCP_PROJECT` / `DHAN_BQ_DATASET` | BigQuery target (default `rajat-trade` / `stock_data_set`) |
-| `DHAN_SHEET_KEY` | Google Sheet with the scrip list |
+**This package contains only functions / repeatable processes — no values.**
+Every variable (dates, Google Sheet key, project, dataset, table names,
+credentials, tokens) lives in *your* calling file (the Colab notebook or a run
+script) and is passed in via `Config(...)`. Nothing project-specific is ever
+committed to the package.
 
-Any field can also be passed directly: `Config(dhan_client_id="...", ...)`.
-
-## Run the daily pipeline
+`Config` is just a schema with a few process-constants (`api_url`, `batch_size`,
+`price_decimals`, ...). You fill the rest:
 
 ```python
-from dhan_pipeline import Config
-from dhan_pipeline.daily import run_daily
+from dhan_pipeline import Config, run_daily, recent_window
 
-cfg = Config()          # reads env vars
-result = run_daily(cfg) # fetch 2 days -> split-check -> upsert last day
-result["flags"]         # DataFrame of scrips flagged for a suspected split
+FROM_DATE, TO_DATE = recent_window(days=4)   # or hardcode ('2026-07-27', '2026-07-28')
+
+cfg = Config(
+    dhan_client_id="...", dhan_access_token="...",
+    service_account_file="/path/to/service_account.json",
+    project_id="rajat-trade", dataset_id="stock_data_set",
+    daily_table="stock_daily_prices_dhan",
+    staging_table="stock_daily_prices_dhan_staging",
+    flag_table="corporate_action_flags", instrument_table="instrument_list",
+    sheet_key="<google-sheet-key>", list_worksheet="my_list",
+    negative_worksheet="Negative List",
+)
+
+result = run_daily(cfg, FROM_DATE, TO_DATE)   # fetch window -> split-check -> upsert
+result["flags"]                                # scrips flagged for a suspected split
 ```
 
-Or from the shell: `python scripts/run_daily.py`
+Ready-made *files* (edit and use, not part of the reusable logic):
+- `notebooks/daily_pipeline.ipynb` — thin Colab notebook, all values in one cell
+- `scripts/run_daily.py` — local run template
 
 ## How split detection works
 
@@ -59,7 +70,7 @@ series is on the post-split basis.
 
 ```
 dhan_pipeline/
-  config.py      # single source of truth for every setting (env-driven)
+  config.py      # Config schema (no values) + process constants
   auth.py        # BigQuery / gspread / dhan client factories
   scrips.py      # load scrip list from Google Sheets, subset helpers
   fetch.py       # async Dhan historical OHLCV fetcher (the reusable core)

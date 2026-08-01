@@ -15,6 +15,7 @@ from .config import Config
 from .auth import build_clients, bq_client, gspread_client, dhan_client, get_credentials
 from .scrips import load_scrip_mapping, subset
 from .fetch import fetch_ohlcv, generate_row_id
+from .daily import run_daily, recent_window
 
 __all__ = [
     "Config",
@@ -27,4 +28,6 @@ __all__ = [
     "subset",
     "fetch_ohlcv",
     "generate_row_id",
+    "run_daily",
+    "recent_window",
 ]
