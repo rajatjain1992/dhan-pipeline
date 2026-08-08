@@ -18,6 +18,7 @@ from .fetch import fetch_ohlcv, generate_row_id
 from .daily import run_daily, recent_window
 from .bhavcopy import run_bhavcopy
 from .mcap import run_mcap
+from .options import run_options
 
 __all__ = [
     "Config",
@@ -34,4 +35,5 @@ __all__ = [
     "recent_window",
     "run_bhavcopy",
     "run_mcap",
+    "run_options",
 ]
