@@ -203,12 +203,9 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
     bq = bq_client(cfg)
     ensure_table(bq, table_ref)
 
-    total_calls = total * len(windows)
-
     frames, success, failure = [], 0, 0
-    with tqdm(total=total_calls, desc="Fetching", unit="call") as bar:
-        for from_date, to_date in windows:
-            bar.set_description(f"{from_date} -> {to_date}")
+    for from_date, to_date in windows:
+        with tqdm(total=total, desc=f"{from_date} -> {to_date}", unit="scrip") as bar:
             for _, row in scrip_mapping.iterrows():
                 df, err = fetch_one(
                     cfg, row[security_id_col], row[exchange_col],
