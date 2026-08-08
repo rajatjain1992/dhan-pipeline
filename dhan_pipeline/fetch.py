@@ -29,7 +29,27 @@ def generate_row_id(row):
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-async def _fetch_one(session, cfg, row, from_date, to_date, failed, retries=0):
+class AsyncRateLimiter:
+    """Caps dispatch to at most `rate_per_sec` requests/sec, shared across every
+    concurrent task in a fetch_ohlcv() run (not just within one batch) -- this
+    is what actually keeps Dhan from returning 429 in the first place."""
+
+    def __init__(self, rate_per_sec):
+        self.min_interval = (1.0 / rate_per_sec) if rate_per_sec > 0 else 0
+        self._lock = asyncio.Lock()
+        self._last = 0.0
+
+    async def wait(self):
+        async with self._lock:
+            now = time.monotonic()
+            remaining = self.min_interval - (now - self._last)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._last = time.monotonic()
+
+
+async def _fetch_one(session, cfg, row, from_date, to_date, failed, rate_limiter,
+                     retries=0, rl_retries=0):
     payload = {
         "securityId": str(row["security_id"]),
         "exchangeSegment": row["exc_seg"],
@@ -46,6 +66,7 @@ async def _fetch_one(session, cfg, row, from_date, to_date, failed, retries=0):
     }
     scrip_name = row["scrip"]
 
+    await rate_limiter.wait()
     try:
         timeout = aiohttp.ClientTimeout(total=cfg.fetch_timeout_s)
         async with session.post(cfg.api_url, json=payload, headers=headers,
@@ -78,8 +99,17 @@ async def _fetch_one(session, cfg, row, from_date, to_date, failed, retries=0):
                 return df[OUT_COLS]
 
             if status == 429:  # rate limited
-                await asyncio.sleep(5)
-                return await _fetch_one(session, cfg, row, from_date, to_date, failed, retries)
+                if rl_retries >= cfg.max_rate_limit_retries:
+                    # Bounded: without this cap, sustained rate-limiting makes
+                    # every concurrent task in the batch retry forever, and
+                    # asyncio.gather() never returns -- the whole run hangs
+                    # with no error and no progress.
+                    failed.append(scrip_name)
+                    return None
+                backoff = min(60, 5 * (2 ** rl_retries))  # 5s, 10s, 20s, 40s, 60s...
+                await asyncio.sleep(backoff)
+                return await _fetch_one(session, cfg, row, from_date, to_date, failed,
+                                        rate_limiter, retries, rl_retries + 1)
 
             # 400 / 404 / other -> permanent failure for this scrip
             failed.append(scrip_name)
@@ -88,16 +118,17 @@ async def _fetch_one(session, cfg, row, from_date, to_date, failed, retries=0):
     except Exception:
         if retries < cfg.max_retries:
             await asyncio.sleep(2)
-            return await _fetch_one(session, cfg, row, from_date, to_date, failed, retries + 1)
+            return await _fetch_one(session, cfg, row, from_date, to_date, failed,
+                                    rate_limiter, retries + 1, rl_retries)
         failed.append(scrip_name)
         return None
 
 
-async def _fetch_batch(cfg, batch_df, from_date, to_date, failed):
+async def _fetch_batch(cfg, batch_df, from_date, to_date, failed, rate_limiter):
     out = []
     async with aiohttp.ClientSession() as session:
         tasks = [
-            _fetch_one(session, cfg, row, from_date, to_date, failed)
+            _fetch_one(session, cfg, row, from_date, to_date, failed, rate_limiter)
             for _, row in batch_df.iterrows()
         ]
         for res in await asyncio.gather(*tasks, return_exceptions=True):
@@ -114,12 +145,13 @@ def fetch_ohlcv(cfg, scrip_mapping, from_date, to_date, desc="Fetching"):
     nest_asyncio.apply()
     failed = []
     all_data = []
+    rate_limiter = AsyncRateLimiter(cfg.requests_per_sec)
 
     loop = asyncio.get_event_loop()
     for i in tqdm(range(0, len(scrip_mapping), cfg.batch_size), desc=desc):
         batch = scrip_mapping.iloc[i:i + cfg.batch_size]
         all_data.extend(loop.run_until_complete(
-            _fetch_batch(cfg, batch, from_date, to_date, failed)
+            _fetch_batch(cfg, batch, from_date, to_date, failed, rate_limiter)
         ))
         time.sleep(cfg.batch_pause_s)
 

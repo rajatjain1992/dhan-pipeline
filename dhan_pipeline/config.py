@@ -37,6 +37,8 @@ class Config:
     max_retries: int = 1
     batch_pause_s: float = 0.8
     fetch_timeout_s: float = 30.0    # per-request timeout for the async daily fetcher
+    requests_per_sec: float = 3.0    # global cap on Dhan calls/sec across all concurrent tasks
+    max_rate_limit_retries: int = 5  # bounded retries on HTTP 429, with exponential backoff
     price_decimals: int = 2          # round O/H/L/C to tick before exact compare
     upload_mismatched: bool = True   # upload flagged scrips anyway (vs skip them)
 
