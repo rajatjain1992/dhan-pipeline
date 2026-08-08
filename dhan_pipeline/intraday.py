@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 import requests
 import pandas as pd
+from tqdm.auto import tqdm
 
 from .auth import bq_client
 
@@ -203,33 +204,28 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
     ensure_table(bq, table_ref)
 
     total_calls = total * len(windows)
-    milestones = sorted({max(1, round(total_calls * p)) for p in (0.2, 0.4, 0.6, 0.8, 1.0)})
-    done = 0
 
     frames, success, failure = [], 0, 0
-    for from_date, to_date in windows:
-        print(f"\nWindow {from_date} -> {to_date}")
-        for _, row in scrip_mapping.iterrows():
-            df, err = fetch_one(
-                cfg, row[security_id_col], row[exchange_col],
-                row[instrument_col], interval, from_date, to_date)
-            if df is not None:
-                df["scrip"] = row[scrip_col]
-                df["exchange"] = row[exchange_col]
-                df["security_id"] = str(row[security_id_col])
-                df["interval_m"] = int(interval)
-                frames.append(df[COLUMNS])
-                success += 1
-            else:
-                failure += 1
-                print(f"  ✗ {row[scrip_col]}: {err}")
+    with tqdm(total=total_calls, desc="Fetching", unit="call") as bar:
+        for from_date, to_date in windows:
+            bar.set_description(f"{from_date} -> {to_date}")
+            for _, row in scrip_mapping.iterrows():
+                df, err = fetch_one(
+                    cfg, row[security_id_col], row[exchange_col],
+                    row[instrument_col], interval, from_date, to_date)
+                if df is not None:
+                    df["scrip"] = row[scrip_col]
+                    df["exchange"] = row[exchange_col]
+                    df["security_id"] = str(row[security_id_col])
+                    df["interval_m"] = int(interval)
+                    frames.append(df[COLUMNS])
+                    success += 1
+                else:
+                    failure += 1
+                    tqdm.write(f"  ✗ {row[scrip_col]}: {err}")
 
-            done += 1
-            if done in milestones:
-                pct = round(100 * done / total_calls)
-                print(f"  ... {done}/{total_calls} calls ({pct}%)")
-
-            time.sleep(pause_s)
+                bar.update(1)
+                time.sleep(pause_s)
 
     print(f"\nAPI: {success} ok / {failure} failed")
 
