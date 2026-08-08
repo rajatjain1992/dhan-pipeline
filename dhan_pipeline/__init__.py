@@ -18,7 +18,7 @@ from .fetch import fetch_ohlcv, generate_row_id
 from .daily import run_daily, recent_window
 from .bhavcopy import run_bhavcopy
 from .mcap import run_mcap
-from .options import run_options
+from .options import run_options, latest_option_date
 
 __all__ = [
     "Config",
@@ -36,4 +36,5 @@ __all__ = [
     "run_bhavcopy",
     "run_mcap",
     "run_options",
+    "latest_option_date",
 ]

@@ -268,8 +268,39 @@ def _to_date(d):
     return datetime.strptime(d, DATE_FMT).date()
 
 
+def latest_option_date(cfg, security_ticker="NIFTY"):
+    """Return the most recent trade_date already in the option table (or None).
+
+    A quick pre-run coverage check: call it before run_options to see where you
+    left off. Reads cfg.option_ref.
+    """
+    cfg.require("project_id", "dataset_id", "option_table")
+    bq = bq_client(cfg)
+    try:
+        df = bq.query(
+            f"SELECT MAX(trade_date) AS max_date FROM `{cfg.option_ref}` "
+            f"WHERE security_ticker = @ticker",
+            job_config=_ticker_param(security_ticker),
+        ).to_dataframe()
+    except Exception as e:
+        print(f"Option table not found / not readable: {e}")
+        return None
+    latest = df["max_date"].iloc[0] if not df.empty else None
+    if latest is None or pd.isna(latest):
+        print(f"No {security_ticker} data yet in {cfg.option_ref}.")
+        return None
+    print(f"Latest {security_ticker} option date in BQ: {latest}")
+    return latest
+
+
+def _ticker_param(ticker):
+    from google.cloud import bigquery
+    return bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("ticker", "STRING", ticker)])
+
+
 # ---- Orchestration ----
-def run_options(cfg, start_date, end_date, nse_csv_path,
+def run_options(cfg, start_date, end_date, nse_csv_path=None,
                 expiry_codes=(1, 2), offsets=range(-10, 11),
                 interval=1, tranche_days=5, bq_max_workers=4,
                 security_ticker="NIFTY", security_id=13,
@@ -279,7 +310,9 @@ def run_options(cfg, start_date, end_date, nse_csv_path,
     Args:
         cfg: Config with dhan_access_token, project_id, dataset_id, option_table.
         start_date, end_date: 'YYYY-MM-DD' strings (or date). end is EXCLUSIVE.
-        nse_csv_path: path to the NSE expiry CSV (Date, Expiry columns).
+        nse_csv_path: OPTIONAL path to the NSE expiry CSV (Date, Expiry columns).
+            If None, fetching still works — fetch_one tries both expiry flags —
+            but the stored expiry_date column will be null.
         expiry_codes, offsets, interval, tranche_days, bq_max_workers: knobs.
     """
     cfg.require("project_id", "dataset_id", "option_table", "dhan_access_token")
@@ -290,7 +323,9 @@ def run_options(cfg, start_date, end_date, nse_csv_path,
     start = _to_date(start_date)
     end = _to_date(end_date)
 
-    expiry_lookup = build_expiry_lookup(nse_csv_path, expiry_codes)
+    expiry_lookup = build_expiry_lookup(nse_csv_path, expiry_codes) if nse_csv_path else {}
+    if not nse_csv_path:
+        print("No NSE CSV given -> expiry_date will be null; both expiry flags tried per call.")
     bq = bq_client(cfg)
     ensure_table(bq, table_ref)
 
