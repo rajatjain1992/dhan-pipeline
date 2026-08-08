@@ -36,6 +36,7 @@ class Config:
     batch_size: int = 5
     max_retries: int = 1
     batch_pause_s: float = 0.8
+    fetch_timeout_s: float = 30.0    # per-request timeout for the async daily fetcher
     price_decimals: int = 2          # round O/H/L/C to tick before exact compare
     upload_mismatched: bool = True   # upload flagged scrips anyway (vs skip them)
 

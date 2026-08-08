@@ -47,7 +47,9 @@ async def _fetch_one(session, cfg, row, from_date, to_date, failed, retries=0):
     scrip_name = row["scrip"]
 
     try:
-        async with session.post(cfg.api_url, json=payload, headers=headers) as resp:
+        timeout = aiohttp.ClientTimeout(total=cfg.fetch_timeout_s)
+        async with session.post(cfg.api_url, json=payload, headers=headers,
+                                timeout=timeout) as resp:
             status = resp.status
 
             if status == 200:
