@@ -20,6 +20,7 @@ class Config:
     project_id: str = ""
     dataset_id: str = ""
     daily_table: str = ""
+    intraday_table: str = ""
     staging_table: str = ""
     flag_table: str = ""
     instrument_table: str = ""
@@ -48,6 +49,10 @@ class Config:
     @property
     def daily_ref(self) -> str:
         return f"{self.project_id}.{self.dataset_id}.{self.daily_table}"
+
+    @property
+    def intraday_ref(self) -> str:
+        return f"{self.project_id}.{self.dataset_id}.{self.intraday_table}"
 
     @property
     def staging_ref(self) -> str:
