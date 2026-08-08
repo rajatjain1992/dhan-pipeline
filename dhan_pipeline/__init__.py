@@ -17,6 +17,7 @@ from .scrips import load_scrip_mapping, subset
 from .fetch import fetch_ohlcv, generate_row_id
 from .daily import run_daily, recent_window
 from .bhavcopy import run_bhavcopy
+from .mcap import run_mcap
 
 __all__ = [
     "Config",
@@ -32,4 +33,5 @@ __all__ = [
     "run_daily",
     "recent_window",
     "run_bhavcopy",
+    "run_mcap",
 ]

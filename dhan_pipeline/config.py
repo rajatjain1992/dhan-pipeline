@@ -24,6 +24,7 @@ class Config:
     flag_table: str = ""
     instrument_table: str = ""
     bhav_table: str = ""
+    mcap_table: str = ""
     sheet_key: str = ""
     list_worksheet: str = ""
     negative_worksheet: str = ""
@@ -62,3 +63,7 @@ class Config:
     @property
     def bhav_ref(self) -> str:
         return f"{self.project_id}.{self.dataset_id}.{self.bhav_table}"
+
+    @property
+    def mcap_ref(self) -> str:
+        return f"{self.project_id}.{self.dataset_id}.{self.mcap_table}"
