@@ -22,6 +22,7 @@ from .options import run_options, latest_option_date
 from .intraday import run_intraday, latest_intraday_date
 from .daily_from_hourly import run_daily_from_hourly
 from .instruments import run_instrument_master
+from .daily_reload import run_daily_reload
 
 __all__ = [
     "Config",
@@ -44,4 +45,5 @@ __all__ = [
     "latest_intraday_date",
     "run_daily_from_hourly",
     "run_instrument_master",
+    "run_daily_reload",
 ]

@@ -104,7 +104,7 @@ async def _fetch_batch(cfg, batch_df, from_date, to_date, failed):
     return out
 
 
-def fetch_ohlcv(cfg, scrip_mapping, from_date, to_date):
+def fetch_ohlcv(cfg, scrip_mapping, from_date, to_date, desc="Fetching"):
     """Fetch OHLCV for every scrip in `scrip_mapping` between the two dates.
 
     Returns (data_df, failed_scrips).
@@ -114,7 +114,7 @@ def fetch_ohlcv(cfg, scrip_mapping, from_date, to_date):
     all_data = []
 
     loop = asyncio.get_event_loop()
-    for i in tqdm(range(0, len(scrip_mapping), cfg.batch_size), desc="Fetching"):
+    for i in tqdm(range(0, len(scrip_mapping), cfg.batch_size), desc=desc):
         batch = scrip_mapping.iloc[i:i + cfg.batch_size]
         all_data.extend(loop.run_until_complete(
             _fetch_batch(cfg, batch, from_date, to_date, failed)
