@@ -8,7 +8,7 @@ Repeatable *process* only. Every value (token, project, dataset, table, the
 scrip mapping, and all the date/interval knobs) is supplied by the caller.
 """
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 import pandas as pd
@@ -42,13 +42,39 @@ def _schema():
 
 def build_windows(start_date, n, window_days, step_days):
     """Return [(from_str, to_str), ...]: n windows, each `window_days` long,
-    each starting `step_days` after the previous. All 'YYYY-MM-DD'."""
+    each starting `step_days` after the previous. All 'YYYY-MM-DD'.
+
+    NOTE: if step_days > window_days, there are GAPS between windows -- days
+    fall through uncovered. This is fine for run_intraday's original use
+    (sampling recent weeks), but NOT safe for a full-history reload. Use
+    build_contiguous_windows for that instead.
+    """
     start = datetime.strptime(start_date, DATE_FMT) if isinstance(start_date, str) else start_date
     windows = []
     for i in range(n):
         f = start + timedelta(days=i * step_days)
         t = f + timedelta(days=window_days)
         windows.append((f.strftime(DATE_FMT), t.strftime(DATE_FMT)))
+    return windows
+
+
+def build_contiguous_windows(start_date, end_date, window_days):
+    """Return [(from_str, to_str), ...] chunks of `window_days` that exactly
+    tile [start_date, end_date] with NO gaps and NO manual n/step math --
+    the count of windows is computed automatically from the span. The last
+    window is clipped to end_date so it never overshoots.
+    """
+    start = start_date if isinstance(start_date, date) else datetime.strptime(start_date, DATE_FMT).date()
+    end = end_date if isinstance(end_date, date) else datetime.strptime(end_date, DATE_FMT).date()
+    if end < start:
+        raise ValueError(f"end_date {end} is before start_date {start}")
+
+    windows = []
+    cur = start
+    while cur <= end:
+        window_end = min(cur + timedelta(days=window_days), end + timedelta(days=1))
+        windows.append((cur.strftime(DATE_FMT), window_end.strftime(DATE_FMT)))
+        cur = cur + timedelta(days=window_days)
     return windows
 
 
@@ -246,3 +272,165 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
     print(f"Loaded {len(all_data)} new rows into {table_ref}")
     return {"fetched": len(frames), "loaded": len(all_data),
             "failed": failure, "table": table_ref}
+
+
+def flagged_scrip_date_bounds(cfg, flagged_scrips, interval=15):
+    """Which of `flagged_scrips` actually have interval_m=`interval` rows in
+    the intraday table, plus the OVERALL oldest/newest candle date across
+    just those eligible scrips.
+
+    Returns (eligible_scrips, oldest_date, newest_date). eligible_scrips is
+    empty (and the dates None) if none of the flagged scrips are in the
+    intraday table at this interval.
+    """
+    from google.cloud import bigquery
+    cfg.require("project_id", "dataset_id", "intraday_table")
+    if not flagged_scrips:
+        return [], None, None
+
+    bq = bq_client(cfg)
+    try:
+        df = bq.query(
+            f"SELECT scrip, MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts "
+            f"FROM `{cfg.intraday_ref}` "
+            f"WHERE interval_m = @interval AND scrip IN UNNEST(@scrips) "
+            f"GROUP BY scrip",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("interval", "INT64", int(interval)),
+                bigquery.ArrayQueryParameter("scrips", "STRING", list(flagged_scrips)),
+            ]),
+        ).to_dataframe()
+    except Exception as e:
+        print(f"Intraday table not found / not readable: {e}")
+        return [], None, None
+
+    if df.empty:
+        return [], None, None
+
+    eligible = sorted(df["scrip"].unique())
+    oldest = pd.to_datetime(int(df["min_ts"].min()), unit="s", utc=True) \
+        .tz_convert("Asia/Kolkata").date()
+    newest = pd.to_datetime(int(df["max_ts"].max()), unit="s", utc=True) \
+        .tz_convert("Asia/Kolkata").date()
+    return eligible, oldest, newest
+
+
+def delete_scrips_interval(bq, table_ref, scrips, interval):
+    from google.cloud import bigquery
+    if not scrips:
+        return
+    bq.query(
+        f"DELETE FROM `{table_ref}` WHERE interval_m = @interval AND scrip IN UNNEST(@scrips)",
+        job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("interval", "INT64", int(interval)),
+            bigquery.ArrayQueryParameter("scrips", "STRING", list(scrips)),
+        ]),
+    ).result()
+
+
+def run_intraday_reload_for_flagged(cfg, scrip_mapping, flagged_scrips, interval=15,
+                                    window_days=5, pause_s=0.5, dry_run=False,
+                                    scrip_col="scrip", security_id_col="security_id",
+                                    exchange_col="exc_seg", instrument_col="instrument_type"):
+    """After a split-check flags some scrips (e.g. from run_daily_reload's
+    `flagged_scrips`), reload their intraday history at `interval` minutes.
+
+    Only scrips that ALREADY have interval_m=`interval` rows are touched --
+    a flagged scrip that was never fetched at this interval is skipped (there
+    is nothing stale to fix). For eligible scrips: their entire existing span
+    (oldest -> newest candle currently in BigQuery) is deleted and refetched,
+    using build_contiguous_windows so the window count is computed
+    automatically from the span -- no window_days/step_days/n arithmetic to
+    get wrong and silently miss days.
+
+    Args:
+        cfg: Config with dhan creds, project_id, dataset_id, intraday_table.
+        scrip_mapping: full scrip list (scrip, security_id, exc_seg,
+            instrument_type) -- used to look up eligible scrips' API params.
+        flagged_scrips: scrip names to check/reload (e.g. from
+            run_daily_reload(...)["flagged_scrips"]).
+        interval: candle interval in minutes to check/reload (your ask: 15).
+        window_days: size of each contiguous fetch chunk.
+        dry_run: if True, reports eligible scrips + span + window count but
+            does not delete or fetch anything.
+    """
+    cfg.require("project_id", "dataset_id", "intraday_table",
+                "dhan_client_id", "dhan_access_token")
+    table_ref = cfg.intraday_ref
+
+    if not flagged_scrips:
+        print("No flagged scrips given -- nothing to do.")
+        return {"eligible": [], "not_eligible": [], "loaded": 0, "table": table_ref}
+
+    eligible, oldest, newest = flagged_scrip_date_bounds(cfg, flagged_scrips, interval)
+    not_eligible = [s for s in flagged_scrips if s not in eligible]
+
+    print(f"{len(flagged_scrips)} flagged scrip(s); "
+          f"{len(eligible)} have interval_m={interval} data, "
+          f"{len(not_eligible)} do not (skipped): {not_eligible}")
+
+    if not eligible:
+        return {"eligible": [], "not_eligible": not_eligible, "loaded": 0, "table": table_ref}
+
+    windows = build_contiguous_windows(oldest, newest, window_days)
+    print(f"Eligible span: {oldest} -> {newest}  "
+          f"({len(windows)} contiguous {window_days}d window(s), auto-computed)")
+
+    if dry_run:
+        print(f"[DRY RUN] would delete existing interval_m={interval} rows for "
+              f"{len(eligible)} scrip(s): {eligible}")
+        print(f"[DRY RUN] would fetch {len(windows)} window(s) x {len(eligible)} scrip(s) "
+              f"and reload {table_ref}.")
+        return {"eligible": eligible, "not_eligible": not_eligible, "loaded": 0,
+                "oldest": oldest, "newest": newest, "windows": len(windows),
+                "table": table_ref, "dry_run": True}
+
+    bq = bq_client(cfg)
+    ensure_table(bq, table_ref)
+
+    print(f"Deleting existing interval_m={interval} rows for {len(eligible)} scrip(s)...")
+    delete_scrips_interval(bq, table_ref, eligible, interval)
+
+    sub_mapping = scrip_mapping[scrip_mapping[scrip_col].isin(eligible)]
+
+    frames, success, failure = [], 0, 0
+    for from_date, to_date in windows:
+        with tqdm(total=len(sub_mapping), desc=f"{from_date} -> {to_date}", unit="scrip") as bar:
+            for _, row in sub_mapping.iterrows():
+                df, err = fetch_one(
+                    cfg, row[security_id_col], row[exchange_col],
+                    row[instrument_col], interval, from_date, to_date)
+                if df is not None:
+                    df["scrip"] = row[scrip_col]
+                    df["exchange"] = row[exchange_col]
+                    df["security_id"] = str(row[security_id_col])
+                    df["interval_m"] = int(interval)
+                    frames.append(df[COLUMNS])
+                    success += 1
+                else:
+                    failure += 1
+                    tqdm.write(f"  ✗ {row[scrip_col]}: {err}")
+
+                bar.update(1)
+                time.sleep(pause_s)
+
+    print(f"\nAPI: {success} ok / {failure} failed")
+
+    if not frames:
+        print("Nothing fetched.")
+        return {"eligible": eligible, "not_eligible": not_eligible, "loaded": 0,
+                "failed": failure, "table": table_ref}
+
+    all_data = clean(pd.concat(frames, ignore_index=True))
+    print(f"Fetched {len(all_data)} clean candles.")
+
+    from google.cloud import bigquery
+    bq.load_table_from_dataframe(
+        all_data, table_ref,
+        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_APPEND"),
+    ).result()
+    print(f"✅ Loaded {len(all_data)} rows into {table_ref} for {len(eligible)} scrip(s).")
+
+    return {"eligible": eligible, "not_eligible": not_eligible, "loaded": len(all_data),
+            "failed": failure, "oldest": oldest, "newest": newest,
+            "windows": len(windows), "table": table_ref, "dry_run": False}
