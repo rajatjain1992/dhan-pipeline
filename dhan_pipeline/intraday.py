@@ -202,6 +202,10 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
     bq = bq_client(cfg)
     ensure_table(bq, table_ref)
 
+    total_calls = total * len(windows)
+    milestones = sorted({max(1, round(total_calls * p)) for p in (0.2, 0.4, 0.6, 0.8, 1.0)})
+    done = 0
+
     frames, success, failure = [], 0, 0
     for from_date, to_date in windows:
         print(f"\nWindow {from_date} -> {to_date}")
@@ -219,6 +223,12 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
             else:
                 failure += 1
                 print(f"  ✗ {row[scrip_col]}: {err}")
+
+            done += 1
+            if done in milestones:
+                pct = round(100 * done / total_calls)
+                print(f"  ... {done}/{total_calls} calls ({pct}%)")
+
             time.sleep(pause_s)
 
     print(f"\nAPI: {success} ok / {failure} failed")
