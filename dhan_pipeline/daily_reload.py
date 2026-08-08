@@ -84,9 +84,13 @@ def delete_temp(client, table_ref):
 
 
 def _count_temp(client, table_ref):
+    return _count_where(client, table_ref, f"exchange = '{TEMP_EXCHANGE}'")
+
+
+def _count_where(client, table_ref, where="TRUE"):
     try:
         df = client.query(
-            f"SELECT COUNT(*) AS n FROM `{table_ref}` WHERE exchange = '{TEMP_EXCHANGE}'"
+            f"SELECT COUNT(*) AS n FROM `{table_ref}` WHERE {where}"
         ).to_dataframe()
         return int(df["n"].iloc[0])
     except Exception:
@@ -155,14 +159,19 @@ def _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run):
     print(f"LIFETIME reload: {lifetime_start} -> {_today()} for {len(scrip_mapping)} scrips.")
 
     if dry_run:
-        # No fetch either: a real lifetime fetch (2001 -> today, every scrip) is
-        # the expensive part -- skip it so dry_run stays a cheap, safe preview.
-        print("[DRY RUN] would delete ALL rows from the daily table.")
+        # No fetch: a real lifetime fetch (2001 -> today, every scrip) is the
+        # expensive part -- skip it so dry_run stays cheap. Still show the real
+        # count of rows currently in the table via a plain COUNT(*), so the
+        # preview is grounded in actual numbers, not just intent.
+        existing_rows = _count_where(client, cfg.daily_ref)
+        print(f"[DRY RUN] would delete ALL {existing_rows:,} existing row(s) "
+              f"from {cfg.daily_ref}.")
         print(f"[DRY RUN] would fetch full lifetime history for {len(scrip_mapping)} "
               f"scrip(s) from {lifetime_start} -> {_today()} (not fetched in dry run).")
         print(f"[DRY RUN] would upsert the result into {cfg.daily_ref}.")
-        return {"mode": "lifetime", "fetched": 0, "uploaded": 0, "failed": [],
-                "flagged_scrips": [], "table": cfg.daily_ref, "dry_run": True}
+        return {"mode": "lifetime", "existing_rows": existing_rows, "fetched": 0,
+                "uploaded": 0, "failed": [], "flagged_scrips": [],
+                "table": cfg.daily_ref, "dry_run": True}
 
     print("Deleting all existing rows...")
     delete_all(client, cfg.daily_ref)
