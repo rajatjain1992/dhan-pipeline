@@ -23,6 +23,7 @@ class Config:
     staging_table: str = ""
     flag_table: str = ""
     instrument_table: str = ""
+    bhav_table: str = ""
     sheet_key: str = ""
     list_worksheet: str = ""
     negative_worksheet: str = ""
@@ -57,3 +58,7 @@ class Config:
     @property
     def instrument_ref(self) -> str:
         return f"{self.project_id}.{self.dataset_id}.{self.instrument_table}"
+
+    @property
+    def bhav_ref(self) -> str:
+        return f"{self.project_id}.{self.dataset_id}.{self.bhav_table}"

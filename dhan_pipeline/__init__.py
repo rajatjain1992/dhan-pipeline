@@ -16,6 +16,7 @@ from .auth import build_clients, bq_client, gspread_client, dhan_client, get_cre
 from .scrips import load_scrip_mapping, subset
 from .fetch import fetch_ohlcv, generate_row_id
 from .daily import run_daily, recent_window
+from .bhavcopy import run_bhavcopy
 
 __all__ = [
     "Config",
@@ -30,4 +31,5 @@ __all__ = [
     "generate_row_id",
     "run_daily",
     "recent_window",
+    "run_bhavcopy",
 ]
