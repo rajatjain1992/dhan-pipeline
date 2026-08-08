@@ -13,6 +13,16 @@ Two modes:
       refetched (their whole series is stale post-split), everyone else
       just gets the range reuploaded.
 
+Every run also clears out any exchange='TEMP' rows first -- those are
+leftovers from the daily-from-hourly rollup path (`run_daily_from_hourly`),
+which tags its rows TEMP and lives in the same daily table. This module
+manages the "real" data, so stale TEMP rows are wiped before it does anything
+else, regardless of mode.
+
+`dry_run=True` runs the whole flow (fetch + split-check) but skips every
+DELETE/upsert against BigQuery -- prints what *would* happen instead, so you
+can sanity-check dates/mode before committing.
+
 Repeatable *process* only. Every value (dates, mode, buffer, table names,
 the scrip mapping) is supplied by the caller via `cfg` and the arguments to
 `run_daily_reload`.
@@ -29,6 +39,7 @@ from .splitcheck import detect_corporate_actions
 
 DATE_FMT = "%Y-%m-%d"
 LIFETIME_START = "2001-01-01"
+TEMP_EXCHANGE = "TEMP"
 
 
 def _today():
@@ -66,9 +77,26 @@ def delete_all(client, table_ref):
     client.query(f"DELETE FROM `{table_ref}` WHERE TRUE").result()
 
 
+def delete_temp(client, table_ref):
+    client.query(
+        f"DELETE FROM `{table_ref}` WHERE exchange = '{TEMP_EXCHANGE}'"
+    ).result()
+
+
+def _count_temp(client, table_ref):
+    try:
+        df = client.query(
+            f"SELECT COUNT(*) AS n FROM `{table_ref}` WHERE exchange = '{TEMP_EXCHANGE}'"
+        ).to_dataframe()
+        return int(df["n"].iloc[0])
+    except Exception:
+        return 0
+
+
 def run_daily_reload(cfg, scrip_mapping, mode, from_date=None, to_date=None,
                      buffer_days=5, lifetime_start=LIFETIME_START,
-                     flags_csv="corporate_action_flags.csv", write_flags_to_bq=True):
+                     flags_csv="corporate_action_flags.csv", write_flags_to_bq=True,
+                     clear_temp=True, dry_run=False):
     """Reload the daily table: full lifetime, or a targeted date range.
 
     Args:
@@ -87,24 +115,54 @@ def run_daily_reload(cfg, scrip_mapping, mode, from_date=None, to_date=None,
         lifetime_start: mode="lifetime" (and the flagged-scrip refetch in
             range mode) start date. Empty results before a scrip's listing
             date are harmless.
+        clear_temp: delete any exchange='TEMP' rows (leftovers from
+            run_daily_from_hourly) before doing anything else. On by default.
+        dry_run: if True, still fetches from Dhan and runs the split-check
+            (so you see exactly what would be flagged/deleted/uploaded), but
+            skips every DELETE and upsert against BigQuery.
     """
     cfg.require("project_id", "dataset_id", "daily_table", "staging_table",
                 "dhan_client_id", "dhan_access_token")
     client = bq_client(cfg)
     bqmod.ensure_table(client, cfg.daily_ref, bqmod.DAILY_SCHEMA)
 
+    if dry_run:
+        print("=== DRY RUN: no deletes or uploads will happen ===\n")
+
+    if clear_temp:
+        temp_n = _count_temp(client, cfg.daily_ref)
+        if temp_n:
+            if dry_run:
+                print(f"[DRY RUN] would delete {temp_n} exchange='TEMP' row(s).")
+            else:
+                delete_temp(client, cfg.daily_ref)
+                print(f"Deleted {temp_n} exchange='TEMP' row(s).")
+        else:
+            print("No exchange='TEMP' rows to clear.")
+
     if mode == "lifetime":
-        return _run_lifetime(cfg, client, scrip_mapping, lifetime_start)
+        return _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run)
     if mode == "range":
         if not from_date or not to_date:
             raise ValueError("mode='range' requires from_date and to_date")
         return _run_range(cfg, client, scrip_mapping, from_date, to_date,
-                          buffer_days, lifetime_start, flags_csv, write_flags_to_bq)
+                          buffer_days, lifetime_start, flags_csv,
+                          write_flags_to_bq, dry_run)
     raise ValueError(f"mode must be 'lifetime' or 'range', got {mode!r}")
 
 
-def _run_lifetime(cfg, client, scrip_mapping, lifetime_start):
+def _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run):
     print(f"LIFETIME reload: {lifetime_start} -> {_today()} for {len(scrip_mapping)} scrips.")
+
+    if dry_run:
+        # No fetch either: a real lifetime fetch (2001 -> today, every scrip) is
+        # the expensive part -- skip it so dry_run stays a cheap, safe preview.
+        print("[DRY RUN] would delete ALL rows from the daily table.")
+        print(f"[DRY RUN] would fetch full lifetime history for {len(scrip_mapping)} "
+              f"scrip(s) from {lifetime_start} -> {_today()} (not fetched in dry run).")
+        print(f"[DRY RUN] would upsert the result into {cfg.daily_ref}.")
+        return {"mode": "lifetime", "fetched": 0, "uploaded": 0, "failed": [],
+                "flagged_scrips": [], "table": cfg.daily_ref, "dry_run": True}
 
     print("Deleting all existing rows...")
     delete_all(client, cfg.daily_ref)
@@ -121,11 +179,12 @@ def _run_lifetime(cfg, client, scrip_mapping, lifetime_start):
         print(f"⚠️  Failed to fetch {len(failed)} scrip(s): {failed}")
 
     return {"mode": "lifetime", "fetched": len(fetched), "uploaded": uploaded,
-            "failed": failed, "flagged_scrips": [], "table": cfg.daily_ref}
+            "failed": failed, "flagged_scrips": [], "table": cfg.daily_ref,
+            "dry_run": False}
 
 
 def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
-               lifetime_start, flags_csv, write_flags_to_bq):
+               lifetime_start, flags_csv, write_flags_to_bq, dry_run):
     from_d, to_d = _to_date(from_date), _to_date(to_date)
     fetch_from = (from_d - timedelta(days=buffer_days)).strftime(DATE_FMT)
 
@@ -142,7 +201,7 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
     if fetched.empty:
         print("Nothing fetched -- nothing to do.")
         return {"mode": "range", "fetched": 0, "uploaded": 0, "failed": failed,
-                "flagged_scrips": [], "table": cfg.daily_ref}
+                "flagged_scrips": [], "table": cfg.daily_ref, "dry_run": dry_run}
 
     # ---- 2. Split-check at the OLDEST date within the selected range itself ----
     in_range = fetched[(fetched["trade_date"] >= from_d) & (fetched["trade_date"] <= to_d)]
@@ -160,41 +219,58 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
     if flagged_scrips:
         print(f"\n⚠️  {len(flagged_scrips)} scrip(s) flagged at {check_date} "
               f"(suspected split/adjustment): {flagged_scrips}")
-        if flags_csv:
-            flags.to_csv(flags_csv, index=False)
-            print(f"   flags saved -> {flags_csv}")
-        if write_flags_to_bq:
-            bqmod.write_flags(cfg, client, flags)
-            print(f"   flags appended -> {cfg.flag_ref}")
+        if dry_run:
+            print("[DRY RUN] would save/append flags, would NOT write them now.")
+        else:
+            if flags_csv:
+                flags.to_csv(flags_csv, index=False)
+                print(f"   flags saved -> {flags_csv}")
+            if write_flags_to_bq:
+                bqmod.write_flags(cfg, client, flags)
+                print(f"   flags appended -> {cfg.flag_ref}")
     else:
         print(f"\n✅ No split/adjustment mismatch at {check_date}.")
 
     # ---- 3. Delete: the range for everyone, plus full lifetime for flagged scrips ----
-    print(f"\nDeleting range {from_date} -> {to_date} for all scrips...")
-    delete_range(client, cfg.daily_ref, from_d, to_d)
-
-    if flagged_scrips:
-        print(f"Deleting COMPLETE lifetime history for {len(flagged_scrips)} flagged scrip(s)...")
-        delete_scrips(client, cfg.daily_ref, flagged_scrips)
+    if dry_run:
+        print(f"\n[DRY RUN] would delete range {from_date} -> {to_date} for all scrips.")
+        if flagged_scrips:
+            print(f"[DRY RUN] would delete COMPLETE lifetime history for "
+                  f"{len(flagged_scrips)} flagged scrip(s): {flagged_scrips}")
+    else:
+        print(f"\nDeleting range {from_date} -> {to_date} for all scrips...")
+        delete_range(client, cfg.daily_ref, from_d, to_d)
+        if flagged_scrips:
+            print(f"Deleting COMPLETE lifetime history for {len(flagged_scrips)} flagged scrip(s)...")
+            delete_scrips(client, cfg.daily_ref, flagged_scrips)
 
     # ---- 4. Upload: range data for clean scrips, full lifetime refetch for flagged ----
     clean_upload = in_range[~in_range["scrip"].isin(flagged_scrips)].copy()
-    uploaded_range = bqmod.upsert_daily(cfg, client, clean_upload)
-    print(f"✅ Upserted {uploaded_range} range rows for "
-          f"{clean_upload['scrip'].nunique() if not clean_upload.empty else 0} clean scrips.")
+    if dry_run:
+        print(f"[DRY RUN] would upsert {len(clean_upload)} range rows for "
+              f"{clean_upload['scrip'].nunique() if not clean_upload.empty else 0} clean scrips.")
+        uploaded_range = 0
+    else:
+        uploaded_range = bqmod.upsert_daily(cfg, client, clean_upload)
+        print(f"✅ Upserted {uploaded_range} range rows for "
+              f"{clean_upload['scrip'].nunique() if not clean_upload.empty else 0} clean scrips.")
 
     uploaded_lifetime = 0
     if flagged_scrips:
-        flagged_mapping = scrip_mapping[scrip_mapping["scrip"].isin(flagged_scrips)]
-        # security_id/exchange/instrument_type come from scrip_mapping, not BQ
-        # (BQ's copy for these scrips was just deleted).
-        lifetime_fetched, lifetime_failed = fetch_ohlcv(
-            cfg, flagged_mapping, lifetime_start, _today(),
-            desc="Lifetime refetch (flagged)")
-        uploaded_lifetime = bqmod.upsert_daily(cfg, client, lifetime_fetched)
-        print(f"✅ Upserted {uploaded_lifetime} lifetime rows for "
-              f"{len(flagged_scrips)} flagged scrip(s).")
-        failed = failed + lifetime_failed
+        if dry_run:
+            print(f"[DRY RUN] would refetch + upsert full lifetime history for "
+                  f"{len(flagged_scrips)} flagged scrip(s) (no fetch performed in dry run).")
+        else:
+            flagged_mapping = scrip_mapping[scrip_mapping["scrip"].isin(flagged_scrips)]
+            # security_id/exchange/instrument_type come from scrip_mapping, not BQ
+            # (BQ's copy for these scrips was just deleted).
+            lifetime_fetched, lifetime_failed = fetch_ohlcv(
+                cfg, flagged_mapping, lifetime_start, _today(),
+                desc="Lifetime refetch (flagged)")
+            uploaded_lifetime = bqmod.upsert_daily(cfg, client, lifetime_fetched)
+            print(f"✅ Upserted {uploaded_lifetime} lifetime rows for "
+                  f"{len(flagged_scrips)} flagged scrip(s).")
+            failed = failed + lifetime_failed
 
     if failed:
         print(f"\n⚠️  Failed to fetch {len(failed)} scrip(s): {failed}")
@@ -203,4 +279,4 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
             "flagged_scrips": flagged_scrips, "flags": flags,
             "uploaded_range": uploaded_range, "uploaded_lifetime": uploaded_lifetime,
             "uploaded": uploaded_range + uploaded_lifetime, "failed": failed,
-            "table": cfg.daily_ref}
+            "table": cfg.daily_ref, "dry_run": dry_run}
