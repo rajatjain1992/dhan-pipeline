@@ -20,6 +20,7 @@ from .bhavcopy import run_bhavcopy
 from .mcap import run_mcap
 from .options import run_options, latest_option_date
 from .intraday import run_intraday, latest_intraday_date
+from .daily_from_hourly import run_daily_from_hourly
 
 __all__ = [
     "Config",
@@ -40,4 +41,5 @@ __all__ = [
     "latest_option_date",
     "run_intraday",
     "latest_intraday_date",
+    "run_daily_from_hourly",
 ]
