@@ -216,14 +216,28 @@ def prepare_df(df):
     df["strike_price"] = pd.to_numeric(df["strike_price"], errors="coerce").round(2)
     for col in ["spot", "open", "high", "low", "close", "iv"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.where(df.notna(), None)
     col_order = [
         "trade_date", "expiry_date", "expiry_flag", "expiry_code",
         "security_ticker", "security_id", "interval",
         "timestamp", "strike_price", "option_type", "strike_offset",
         "spot", "open", "high", "low", "close", "volume", "iv", "oi",
     ]
-    return df[[c for c in col_order if c in df.columns]].to_dict(orient="records")
+    records = df[[c for c in col_order if c in df.columns]].to_dict(orient="records")
+    return [_scrub_nan(r) for r in records]
+
+
+def _scrub_nan(record):
+    """Replace NaN/Inf with None. json.dumps writes bare NaN/Infinity tokens
+    for these, which are not valid JSON -- BigQuery's parser then rejects the
+    whole row ('Parser terminated before end of string'). pandas' df.where(
+    notna(), None) is not reliable here: on numeric columns it can silently
+    keep NaN instead of None due to dtype re-casting, so scrub explicitly
+    after to_dict() instead."""
+    import math
+    for k, v in record.items():
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            record[k] = None
+    return record
 
 
 def bq_write_job(cfg, table_ref, df, label):
