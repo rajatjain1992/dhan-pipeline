@@ -150,28 +150,30 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
     windows = build_windows(start_date, n, step_days, window_days)
     print(f"Total scrips: {len(scrip_mapping)}")
 
-    all_intraday, success, failure = [], 0, 0
+    all_intraday, success, failed_scrips = [], 0, []
     for from_date, to_date in windows:
         print(f"\nFetching: {from_date} -> {to_date}")
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [
+            futures = {
                 ex.submit(fetch_hourly, connect, rate_limiter, row, from_date,
-                         to_date, interval, market_start, market_end, max_retries)
+                         to_date, interval, market_start, market_end, max_retries): row["scrip"]
                 for _, row in scrip_mapping.iterrows()
-            ]
+            }
             for f in tqdm(as_completed(futures), total=len(futures), desc="Fetching"):
                 result = f.result()
                 if result is not None:
                     all_intraday.append(result)
                     success += 1
                 else:
-                    failure += 1
+                    failed_scrips.append(futures[f])
 
-    print(f"\nSuccess: {success}, Failures: {failure}")
+    print(f"\nSuccess: {success}, Failures: {len(failed_scrips)}")
+    if failed_scrips:
+        print(f"Failed scrips: {sorted(failed_scrips)}")
 
     if not all_intraday:
         print("No data fetched.")
-        return {"fetched": 0, "uploaded": 0, "table": cfg.daily_ref}
+        return {"fetched": 0, "uploaded": 0, "failed": sorted(failed_scrips), "table": cfg.daily_ref}
 
     intraday_df = pd.concat(all_intraday, ignore_index=True)
     daily_data = aggregate_daily(intraday_df)
@@ -193,4 +195,4 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
     print(check)
 
     return {"fetched": len(intraday_df), "uploaded": uploaded,
-            "failed": failure, "table": cfg.daily_ref, "check": check}
+            "failed": sorted(failed_scrips), "table": cfg.daily_ref, "check": check}
