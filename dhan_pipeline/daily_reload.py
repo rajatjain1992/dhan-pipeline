@@ -164,22 +164,29 @@ def _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run):
         # count of rows currently in the table via a plain COUNT(*), so the
         # preview is grounded in actual numbers, not just intent.
         existing_rows = _count_where(client, cfg.daily_ref)
-        print(f"[DRY RUN] would delete ALL {existing_rows:,} existing row(s) "
-              f"from {cfg.daily_ref}.")
         print(f"[DRY RUN] would fetch full lifetime history for {len(scrip_mapping)} "
               f"scrip(s) from {lifetime_start} -> {_today()} (not fetched in dry run).")
-        print(f"[DRY RUN] would upsert the result into {cfg.daily_ref}.")
+        print(f"[DRY RUN] would then delete ALL {existing_rows:,} existing row(s) "
+              f"from {cfg.daily_ref} and upsert the freshly fetched data.")
         return {"mode": "lifetime", "existing_rows": existing_rows, "fetched": 0,
                 "uploaded": 0, "failed": [], "flagged_scrips": [],
                 "table": cfg.daily_ref, "dry_run": True}
 
-    print("Deleting all existing rows...")
-    delete_all(client, cfg.daily_ref)
-
+    # Fetch BEFORE deleting anything -- same reasoning as range mode: if the
+    # fetch fails/times out/gets interrupted, the table must still have its
+    # old data, not be sitting empty with nothing to restore.
     fetched, failed = fetch_ohlcv(cfg, scrip_mapping, lifetime_start, _today(),
                                   desc="Lifetime fetch")
     print(f"Fetched {len(fetched)} rows across "
           f"{fetched['scrip'].nunique() if not fetched.empty else 0} scrips.")
+
+    if fetched.empty:
+        print("Nothing fetched -- aborting without touching existing data.")
+        return {"mode": "lifetime", "fetched": 0, "uploaded": 0, "failed": failed,
+                "flagged_scrips": [], "table": cfg.daily_ref, "dry_run": False}
+
+    print("Deleting all existing rows...")
+    delete_all(client, cfg.daily_ref)
 
     uploaded = bqmod.upsert_daily(cfg, client, fetched)
     print(f"✅ Upserted {uploaded} rows into {cfg.daily_ref}.")
