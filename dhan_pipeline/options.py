@@ -11,6 +11,7 @@ via `cfg` and the arguments to `run_options`. Nothing project-specific lives her
 Dhan docs: https://dhanhq.co/docs/v2/expired-options-data/
 """
 import time
+import threading
 import concurrent.futures
 from datetime import date, timedelta, datetime
 
@@ -18,6 +19,27 @@ import requests
 import pandas as pd
 
 from .auth import bq_client
+
+
+class RateLimiter:
+    """Thread-safe "at most N calls/sec" cap, shared across every option call
+    in a run_options() run -- Dhan starts returning empty response bodies
+    (json.loads fails with 'Expecting value') and read timeouts once you
+    exceed its server-side rate limit, same root cause as the DH-904 errors
+    seen in the daily fetcher."""
+
+    def __init__(self, rate_per_sec):
+        self.min_interval = (1.0 / rate_per_sec) if rate_per_sec > 0 else 0
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.time()
+            remaining = self.min_interval - (now - self._last)
+            if remaining > 0:
+                time.sleep(remaining)
+            self._last = time.time()
 
 # ---- Process constants (part of the pipeline, not your setup) ----
 URL = "https://api.dhan.co/v2/charts/rollingoption"
@@ -124,8 +146,29 @@ def get_already_loaded(bq, table_ref):
 
 
 # ---- API call ----
+def _post_with_retry(payload, headers, rate_limiter, max_retries=4):
+    """POST with a shared rate limit + exponential backoff on transient
+    failures (empty body, timeout, connection errors) -- these are Dhan
+    rate-limiting the account, not permanent failures, so retrying after a
+    pause recovers instead of just giving up on the first hiccup."""
+    for attempt in range(max_retries):
+        rate_limiter.wait()
+        try:
+            r = requests.post(URL, json=payload, headers=headers, timeout=30)
+            return r.json()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                backoff = min(30, 2 * (2 ** attempt))  # 2s, 4s, 8s, 16s...
+                print(f"        API error: {e} -- retrying in {backoff}s "
+                      f"({attempt + 1}/{max_retries})")
+                time.sleep(backoff)
+            else:
+                print(f"        API error: {e} -- giving up after {max_retries} attempts")
+    return {}
+
+
 def fetch_one(cfg, offset, option_type, from_date, to_date,
-              expiry_flag, expiry_code, security_id, interval):
+              expiry_flag, expiry_code, security_id, interval, rate_limiter):
     """Try the given expiry_flag; if empty, try the other. Returns (raw, flag)."""
     headers = {"Content-Type": "application/json",
                "access-token": cfg.dhan_access_token}
@@ -145,16 +188,11 @@ def fetch_one(cfg, offset, option_type, from_date, to_date,
             "fromDate": from_date,
             "toDate": to_date,
         }
-        try:
-            r = requests.post(URL, json=payload, headers=headers, timeout=30)
-            raw = r.json()
-            key = "ce" if option_type == "CALL" else "pe"
-            data = raw.get("data", {}).get(key, {})
-            if data and data.get("timestamp"):
-                return raw, flag
-        except Exception as e:
-            print(f"        API error ({flag}): {e}")
-        time.sleep(0.2)
+        raw = _post_with_retry(payload, headers, rate_limiter)
+        key = "ce" if option_type == "CALL" else "pe"
+        data = raw.get("data", {}).get(key, {})
+        if data and data.get("timestamp"):
+            return raw, flag
     return {}, expiry_flag
 
 
@@ -318,7 +356,7 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
                 expiry_codes=(1, 2), offsets=range(-10, 11),
                 interval=1, tranche_days=5, bq_max_workers=4,
                 security_ticker="NIFTY", security_id=13,
-                per_call_pause=0.1):
+                per_call_pause=0.1, requests_per_sec=4):
     """Download options for [start_date, end_date) and load to cfg.option_ref.
 
     Args:
@@ -328,11 +366,14 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
             If None, fetching still works — fetch_one tries both expiry flags —
             but the stored expiry_date column will be null.
         expiry_codes, offsets, interval, tranche_days, bq_max_workers: knobs.
+        requests_per_sec: shared cap on Dhan calls/sec across this whole run
+            (lower this if you're still seeing empty-body / timeout errors).
     """
     cfg.require("project_id", "dataset_id", "option_table", "dhan_access_token")
     table_ref = cfg.option_ref
     expiry_codes = list(expiry_codes)
     offsets = list(offsets)
+    rate_limiter = RateLimiter(requests_per_sec)
 
     start = _to_date(start_date)
     end = _to_date(end_date)
@@ -388,7 +429,8 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
                     for api_type, label in OPTION_TYPES:
                         raw, flag_used = fetch_one(
                             cfg, offset, api_type, from_str, to_str,
-                            expiry_flag, expiry_code, security_id, interval)
+                            expiry_flag, expiry_code, security_id, interval,
+                            rate_limiter)
                         parsed = parse_one(
                             raw, offset, label, flag_used, expiry_date,
                             expiry_code, trade_date, security_ticker,
