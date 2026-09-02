@@ -57,7 +57,9 @@ def build_windows(start_date, n, step_days, window_days):
 def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
                  market_start, market_end, max_retries):
     """One scrip's hourly candles for [from_date, to_date), market-hours only.
-    Retries with backoff on any error. Returns a tidy DataFrame or None."""
+    Retries with backoff on any error. Returns (DataFrame, None) on success,
+    or (None, reason) on failure -- reason is a short string explaining why,
+    not just a silent None."""
     for attempt in range(max_retries):
         try:
             rate_limiter.wait()
@@ -74,14 +76,14 @@ def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
 
             df = pd.DataFrame(resp["data"])
             if df.empty:
-                return None
+                return None, "empty response (no candles returned)"
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
             df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Kolkata")
             df = df[(df["timestamp"].dt.time >= market_start) &
                     (df["timestamp"].dt.time <= market_end)]
             if df.empty:
-                return None
+                return None, "all candles fell outside market hours"
 
             df["scrip"] = row["scrip"]
             df["exchange"] = TEMP_EXCHANGE
@@ -90,14 +92,14 @@ def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
             df.columns = ["open", "high", "low", "close", "volume", "timestamp",
                          "scrip", "exchange", "security_id", "interval_m"]
             return df[["scrip", "exchange", "security_id", "timestamp",
-                      "interval_m", "open", "high", "low", "close", "volume"]]
+                      "interval_m", "open", "high", "low", "close", "volume"]], None
 
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
             else:
                 print(f"❌ Failed: {row['scrip']} -> {e}")
-                return None
+                return None, str(e)
 
 
 def aggregate_daily(intraday_df):
@@ -150,7 +152,7 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
     windows = build_windows(start_date, n, step_days, window_days)
     print(f"Total scrips: {len(scrip_mapping)}")
 
-    all_intraday, success, failed_scrips = [], 0, []
+    all_intraday, success, failed_reasons = [], 0, {}
     for from_date, to_date in windows:
         print(f"\nFetching: {from_date} -> {to_date}")
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -160,20 +162,22 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
                 for _, row in scrip_mapping.iterrows()
             }
             for f in tqdm(as_completed(futures), total=len(futures), desc="Fetching"):
-                result = f.result()
+                result, reason = f.result()
                 if result is not None:
                     all_intraday.append(result)
                     success += 1
                 else:
-                    failed_scrips.append(futures[f])
+                    failed_reasons[futures[f]] = reason
 
-    print(f"\nSuccess: {success}, Failures: {len(failed_scrips)}")
-    if failed_scrips:
-        print(f"Failed scrips: {sorted(failed_scrips)}")
+    print(f"\nSuccess: {success}, Failures: {len(failed_reasons)}")
+    if failed_reasons:
+        print("Failed scrips:")
+        for scrip in sorted(failed_reasons):
+            print(f"  {scrip}: {failed_reasons[scrip]}")
 
     if not all_intraday:
         print("No data fetched.")
-        return {"fetched": 0, "uploaded": 0, "failed": sorted(failed_scrips), "table": cfg.daily_ref}
+        return {"fetched": 0, "uploaded": 0, "failed": failed_reasons, "table": cfg.daily_ref}
 
     intraday_df = pd.concat(all_intraday, ignore_index=True)
     daily_data = aggregate_daily(intraday_df)
@@ -195,4 +199,4 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
     print(check)
 
     return {"fetched": len(intraday_df), "uploaded": uploaded,
-            "failed": sorted(failed_scrips), "table": cfg.daily_ref, "check": check}
+            "failed": failed_reasons, "table": cfg.daily_ref, "check": check}
