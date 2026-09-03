@@ -255,7 +255,7 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
                     df["exchange"] = row[exchange_col]
                     df["security_id"] = str(row[security_id_col])
                     df["interval_m"] = int(interval)
-                    frames.append(df[COLUMNS])
+                    frames.append(df)  # clean() adds trade_date + does final column selection
                     success += 1
                 else:
                     failure += 1
@@ -419,7 +419,7 @@ def run_intraday_reload_for_flagged(cfg, scrip_mapping, flagged_scrips, interval
                     df["exchange"] = row[exchange_col]
                     df["security_id"] = str(row[security_id_col])
                     df["interval_m"] = int(interval)
-                    frames.append(df[COLUMNS])
+                    frames.append(df)  # clean() adds trade_date + does final column selection
                     success += 1
                 else:
                     failure += 1
