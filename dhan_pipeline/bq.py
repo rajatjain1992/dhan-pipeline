@@ -70,10 +70,17 @@ def upsert_daily(cfg, client, df):
         job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
     ).result()
 
+    # trade_date bounds of THIS batch -- added to the MERGE's ON clause purely
+    # so BigQuery can prune target partitions. Without it, MERGE scans the
+    # whole (now-partitioned) table on every single upsert regardless of how
+    # small the batch is, since there's nothing to prune against.
+    min_date, max_date = df["trade_date"].min(), df["trade_date"].max()
+
     merge_query = f"""
     MERGE `{cfg.daily_ref}` AS target
     USING `{cfg.staging_ref}` AS source
     ON target.row_id = source.row_id
+       AND target.trade_date BETWEEN @min_date AND @max_date
     WHEN MATCHED THEN UPDATE SET
         target.open = source.open,
         target.high = source.high,
@@ -85,7 +92,10 @@ def upsert_daily(cfg, client, df):
         VALUES (source.scrip, source.exchange, source.security_id, source.trade_date,
                 source.open, source.high, source.low, source.close, source.volume, source.row_id)
     """
-    client.query(merge_query).result()
+    client.query(merge_query, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("min_date", "DATE", min_date),
+        bigquery.ScalarQueryParameter("max_date", "DATE", max_date),
+    ])).result()
     client.delete_table(cfg.staging_ref, not_found_ok=True)
     return len(df)
 
