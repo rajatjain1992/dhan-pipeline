@@ -20,7 +20,7 @@ from .auth import bq_client
 INTRADAY_URL = "https://api.dhan.co/v2/charts/intraday"
 DATE_FMT = "%Y-%m-%d"
 COLUMNS = ["scrip", "exchange", "security_id", "timestamp", "interval_m",
-           "open", "high", "low", "close", "volume"]
+           "open", "high", "low", "close", "volume", "trade_date"]
 NUMERIC_COLS = ["open", "high", "low", "close", "volume"]
 
 
@@ -37,6 +37,10 @@ def _schema():
         bigquery.SchemaField("low", "FLOAT64", mode="NULLABLE"),
         bigquery.SchemaField("close", "FLOAT64", mode="NULLABLE"),
         bigquery.SchemaField("volume", "FLOAT64", mode="NULLABLE"),
+        # Derived from `timestamp` (IST calendar date) purely so BigQuery can
+        # partition on it -- `timestamp` itself stays INT64 epoch seconds,
+        # unchanged, for backward compatibility with existing queries.
+        bigquery.SchemaField("trade_date", "DATE", mode="NULLABLE"),
     ]
 
 
@@ -128,6 +132,8 @@ def clean(df):
     df["interval_m"] = pd.to_numeric(df["interval_m"], errors="coerce").astype(int)
     for c in NUMERIC_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["trade_date"] = pd.to_datetime(df["timestamp"], unit="s", utc=True) \
+        .dt.tz_convert("Asia/Kolkata").dt.date
     df = df.drop_duplicates(subset=["security_id", "timestamp", "interval_m"])
     return df[COLUMNS]
 
@@ -147,14 +153,22 @@ def dedup_against_bq(bq, table_ref, df, interval):
     if df.empty:
         return df
     lo, hi = int(df["timestamp"].min()), int(df["timestamp"].max())
+    date_lo = pd.to_datetime(lo, unit="s", utc=True).tz_convert("Asia/Kolkata").date()
+    date_hi = pd.to_datetime(hi, unit="s", utc=True).tz_convert("Asia/Kolkata").date()
     try:
         existing = bq.query(
             f"SELECT DISTINCT security_id, timestamp, interval_m FROM `{table_ref}` "
-            f"WHERE interval_m = @interval AND timestamp BETWEEN @lo AND @hi",
+            f"WHERE interval_m = @interval AND timestamp BETWEEN @lo AND @hi "
+            # trade_date filter is redundant with the timestamp filter above,
+            # but it's what lets BigQuery prune partitions instead of
+            # scanning the whole table on every dedup check.
+            f"AND trade_date BETWEEN @date_lo AND @date_hi",
             job_config=bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("interval", "INT64", int(interval)),
                 bigquery.ScalarQueryParameter("lo", "INT64", lo),
                 bigquery.ScalarQueryParameter("hi", "INT64", hi),
+                bigquery.ScalarQueryParameter("date_lo", "DATE", date_lo),
+                bigquery.ScalarQueryParameter("date_hi", "DATE", date_hi),
             ]),
         ).to_dataframe()
     except Exception:
