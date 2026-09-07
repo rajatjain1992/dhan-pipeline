@@ -44,9 +44,16 @@ def _schema():
     ]
 
 
-def build_windows(start_date, n, window_days, step_days):
-    """Return [(from_str, to_str), ...]: n windows, each `window_days` long,
-    each starting `step_days` after the previous. All 'YYYY-MM-DD'.
+def build_windows(start_date, n, window_days, step_days, end_date=None):
+    """Return [(from_str, to_str), ...]: up to n windows, each `window_days`
+    long, each starting `step_days` after the previous. All 'YYYY-MM-DD'.
+
+    end_date: hard cutoff (default: today) -- a window starting past it is
+    dropped and generation stops there; a window straddling it is clipped so
+    `to` never exceeds it. Without this, a large N (e.g. N=150 from a 2024
+    start) walks straight past today into the future, and Dhan just returns
+    empty/error responses for those calls -- wasted requests against the
+    rate limit for windows that could never have data.
 
     NOTE: if step_days > window_days, there are GAPS between windows -- days
     fall through uncovered. This is fine for run_intraday's original use
@@ -54,10 +61,17 @@ def build_windows(start_date, n, window_days, step_days):
     build_contiguous_windows for that instead.
     """
     start = datetime.strptime(start_date, DATE_FMT) if isinstance(start_date, str) else start_date
+    if end_date is None:
+        cutoff = datetime.combine(date.today(), datetime.min.time())
+    else:
+        cutoff = datetime.strptime(end_date, DATE_FMT) if isinstance(end_date, str) else end_date
+
     windows = []
     for i in range(n):
         f = start + timedelta(days=i * step_days)
-        t = f + timedelta(days=window_days)
+        if f > cutoff:
+            break
+        t = min(f + timedelta(days=window_days), cutoff)
         windows.append((f.strftime(DATE_FMT), t.strftime(DATE_FMT)))
     return windows
 
@@ -218,7 +232,7 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
                  window_days=4, step_days=7, interval=15, pause_s=0.5,
                  scrip_col="scrip", security_id_col="security_id",
                  exchange_col="exc_seg", instrument_col="instrument_type",
-                 check_against_daily=True, check_pct_threshold=0.30):
+                 check_against_daily=True, check_pct_threshold=0.30, end_date=None):
     """Fetch intraday candles for every scrip in `scrip_mapping` across n date
     windows, clean, dedup against BigQuery, and append only new rows.
 
@@ -237,15 +251,20 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
             days, a split that only hit the daily side). See intraday_check.py.
         check_pct_threshold: flag a field if it differs from the daily table
             by more than this fraction (default 0.30 = 30%).
+        end_date: hard cutoff for window generation (default: today). A
+            window starting past this is dropped, one straddling it is
+            clipped -- so a large n (e.g. n=150 from a 2024 start) can't walk
+            past today into the future and waste API calls on empty ranges.
     """
     cfg.require("project_id", "dataset_id", "intraday_table",
                 "dhan_client_id", "dhan_access_token")
     table_ref = cfg.intraday_ref
 
-    windows = build_windows(start_date, n, window_days, step_days)
+    windows = build_windows(start_date, n, window_days, step_days, end_date)
     total = len(scrip_mapping)
-    print(f"{total} scrips x {n} windows "
-          f"({window_days}d wide, {step_days}d step) @ {interval}m")
+    print(f"{total} scrips -> {len(windows)}/{n} window(s) actually generated "
+          f"({window_days}d wide, {step_days}d step) @ {interval}m"
+          + (f"  [{n - len(windows)} dropped: past end_date]" if len(windows) < n else ""))
 
     bq = bq_client(cfg)
     ensure_table(bq, table_ref)
