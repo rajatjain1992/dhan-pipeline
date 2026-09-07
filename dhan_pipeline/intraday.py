@@ -294,9 +294,12 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
 
     flags = None
     if check_against_daily:
-        from .intraday_check import run_intraday_daily_check
-        lo, hi = all_data["trade_date"].min(), all_data["trade_date"].max()
-        flags = run_intraday_daily_check(cfg, lo, hi, interval, check_pct_threshold)
+        if not cfg.daily_table:
+            print("Skipping daily-vs-intraday check: cfg.daily_table not set.")
+        else:
+            from .intraday_check import run_intraday_daily_check
+            lo, hi = all_data["trade_date"].min(), all_data["trade_date"].max()
+            flags = run_intraday_daily_check(cfg, lo, hi, interval, check_pct_threshold)
 
     return {"fetched": len(frames), "loaded": len(all_data),
             "failed": failure, "table": table_ref, "flags": flags}
