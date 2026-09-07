@@ -217,7 +217,8 @@ def latest_intraday_date(cfg, scrip=None, interval=None):
 def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
                  window_days=4, step_days=7, interval=15, pause_s=0.5,
                  scrip_col="scrip", security_id_col="security_id",
-                 exchange_col="exc_seg", instrument_col="instrument_type"):
+                 exchange_col="exc_seg", instrument_col="instrument_type",
+                 check_against_daily=True, check_pct_threshold=0.30):
     """Fetch intraday candles for every scrip in `scrip_mapping` across n date
     windows, clean, dedup against BigQuery, and append only new rows.
 
@@ -230,6 +231,12 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
         window_days: length of each window (your original "4").
         step_days: gap between window starts (your original "7").
         interval: candle interval in minutes (15, 5, 1, ...).
+        check_against_daily: after loading, roll the just-fetched date range
+            up to daily bars and diff against cfg.daily_ref -- catches a
+            scrip that silently needs a full re-fetch (bad candles, missed
+            days, a split that only hit the daily side). See intraday_check.py.
+        check_pct_threshold: flag a field if it differs from the daily table
+            by more than this fraction (default 0.30 = 30%).
     """
     cfg.require("project_id", "dataset_id", "intraday_table",
                 "dhan_client_id", "dhan_access_token")
@@ -284,8 +291,15 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
         job_config=bigquery.LoadJobConfig(write_disposition="WRITE_APPEND"),
     ).result()
     print(f"Loaded {len(all_data)} new rows into {table_ref}")
+
+    flags = None
+    if check_against_daily:
+        from .intraday_check import run_intraday_daily_check
+        lo, hi = all_data["trade_date"].min(), all_data["trade_date"].max()
+        flags = run_intraday_daily_check(cfg, lo, hi, interval, check_pct_threshold)
+
     return {"fetched": len(frames), "loaded": len(all_data),
-            "failed": failure, "table": table_ref}
+            "failed": failure, "table": table_ref, "flags": flags}
 
 
 def flagged_scrip_date_bounds(cfg, flagged_scrips, interval=15):

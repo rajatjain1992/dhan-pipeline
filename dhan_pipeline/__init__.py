@@ -20,6 +20,7 @@ from .bhavcopy import run_bhavcopy
 from .mcap import run_mcap
 from .options import run_options, latest_option_date
 from .intraday import run_intraday, latest_intraday_date, run_intraday_reload_for_flagged
+from .intraday_check import run_intraday_daily_check, compare_to_daily
 from .daily_from_hourly import run_daily_from_hourly
 from .instruments import run_instrument_master
 from .daily_reload import run_daily_reload
@@ -44,6 +45,8 @@ __all__ = [
     "run_intraday",
     "latest_intraday_date",
     "run_intraday_reload_for_flagged",
+    "run_intraday_daily_check",
+    "compare_to_daily",
     "run_daily_from_hourly",
     "run_instrument_master",
     "run_daily_reload",
