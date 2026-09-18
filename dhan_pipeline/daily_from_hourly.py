@@ -151,23 +151,35 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
 
     windows = build_windows(start_date, n, step_days, window_days)
     print(f"Total scrips: {len(scrip_mapping)}")
+    print(f"Windows: {windows}")
 
     all_intraday, success, failed_reasons = [], 0, {}
-    for from_date, to_date in windows:
-        print(f"\nFetching: {from_date} -> {to_date}")
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {
-                ex.submit(fetch_hourly, connect, rate_limiter, row, from_date,
-                         to_date, interval, market_start, market_end, max_retries): row["scrip"]
-                for _, row in scrip_mapping.iterrows()
-            }
-            for f in tqdm(as_completed(futures), total=len(futures), desc="Fetching"):
-                result, reason = f.result()
-                if result is not None:
-                    all_intraday.append(result)
-                    success += 1
-                else:
-                    failed_reasons[futures[f]] = reason
+
+    # ONE pool + rate limiter shared across every (window, scrip) task.
+    # Previously each window opened its own ThreadPoolExecutor and blocked
+    # until every straggler in it (including retry backoff) finished before
+    # the next window's pool could even start -- an idle bubble at every
+    # window boundary even though the shared rate limiter would have let
+    # the next window's calls fire immediately. Flattening into one pool
+    # removes that stall. Throughput ceiling (rate_per_sec) is unchanged --
+    # this only removes dead time, it doesn't raise the cap.
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {}
+        for from_date, to_date in windows:
+            for _, row in scrip_mapping.iterrows():
+                fut = ex.submit(fetch_hourly, connect, rate_limiter, row,
+                                from_date, to_date, interval, market_start,
+                                market_end, max_retries)
+                futures[fut] = (row["scrip"], from_date, to_date)
+
+        for f in tqdm(as_completed(futures), total=len(futures), desc="Fetching"):
+            result, reason = f.result()
+            scrip, from_date, to_date = futures[f]
+            if result is not None:
+                all_intraday.append(result)
+                success += 1
+            else:
+                failed_reasons[f"{scrip} [{from_date}->{to_date}]"] = reason
 
     print(f"\nSuccess: {success}, Failures: {len(failed_reasons)}")
     if failed_reasons:
