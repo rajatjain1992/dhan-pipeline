@@ -270,7 +270,12 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
     ensure_table(bq, table_ref)
 
     frames, success, failure = [], 0, 0
+    empty_count = error_count = 0
     for from_date, to_date in windows:
+        # Live ok/empty/err counts on the bar itself, not just a running
+        # failure total -- lets a pathological window (bad token, dead
+        # endpoint) be spotted within seconds instead of after it's burned
+        # through every remaining scrip.
         with tqdm(total=total, desc=f"{from_date} -> {to_date}", unit="scrip") as bar:
             for _, row in scrip_mapping.iterrows():
                 df, err = fetch_one(
@@ -285,12 +290,21 @@ def run_intraday(cfg, scrip_mapping, start_date="2024-01-01", n=9,
                     success += 1
                 else:
                     failure += 1
-                    tqdm.write(f"  ✗ {row[scrip_col]}: {err}")
+                    is_error = isinstance(err, str) and (
+                        err.startswith("request error:") or err.startswith("HTTP ")
+                    )
+                    if is_error:
+                        error_count += 1
+                        tqdm.write(f"  ❌ error  {row[scrip_col]}: {err}")
+                    else:
+                        empty_count += 1
+                        tqdm.write(f"  ∅ empty  {row[scrip_col]}: {err}")
 
+                bar.set_postfix(ok=success, empty=empty_count, err=error_count)
                 bar.update(1)
                 time.sleep(pause_s)
 
-    print(f"\nAPI: {success} ok / {failure} failed")
+    print(f"\nAPI: {success} ok / {failure} failed ({empty_count} empty, {error_count} error)")
 
     if not frames:
         print("Nothing fetched.")

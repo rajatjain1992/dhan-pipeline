@@ -171,8 +171,11 @@ def run_intraday_daily_check(cfg, from_date, to_date, interval=15,
         print(f"  {scrip}: {reasons}")
 
     if write_flags_to_bq:
-        bqmod.write_flags(cfg, client, flags)
-        print(f"   flags appended -> {cfg.flag_ref}")
+        if not cfg.flag_table:
+            print("   Skipping BQ flag write: cfg.flag_table not set (flags printed above only).")
+        else:
+            bqmod.write_flags(cfg, client, flags)
+            print(f"   flags appended -> {cfg.flag_ref}")
 
     return flags
 
