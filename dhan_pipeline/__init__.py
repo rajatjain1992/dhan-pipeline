@@ -17,6 +17,7 @@ from .scrips import load_scrip_mapping, subset
 from .fetch import fetch_ohlcv, generate_row_id
 from .daily import run_daily, recent_window
 from .bhavcopy import run_bhavcopy
+from .bse_bhavcopy import run_bse_bhavcopy
 from .mcap import run_mcap
 from .options import run_options, latest_option_date
 from .intraday import run_intraday, latest_intraday_date, run_intraday_reload_for_flagged
@@ -39,6 +40,7 @@ __all__ = [
     "run_daily",
     "recent_window",
     "run_bhavcopy",
+    "run_bse_bhavcopy",
     "run_mcap",
     "run_options",
     "latest_option_date",

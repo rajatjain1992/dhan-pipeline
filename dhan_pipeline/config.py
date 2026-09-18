@@ -25,6 +25,7 @@ class Config:
     flag_table: str = ""
     instrument_table: str = ""
     bhav_table: str = ""
+    bse_bhav_table: str = ""
     mcap_table: str = ""
     option_table: str = ""
     sheet_key: str = ""
@@ -72,6 +73,10 @@ class Config:
     @property
     def bhav_ref(self) -> str:
         return f"{self.project_id}.{self.dataset_id}.{self.bhav_table}"
+
+    @property
+    def bse_bhav_ref(self) -> str:
+        return f"{self.project_id}.{self.dataset_id}.{self.bse_bhav_table}"
 
     @property
     def mcap_ref(self) -> str:
