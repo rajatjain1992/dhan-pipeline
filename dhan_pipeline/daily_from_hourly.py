@@ -27,20 +27,48 @@ TEMP_EXCHANGE = "TEMP"
 
 
 class RateLimiter:
-    """Simple thread-safe "at most N calls/sec" limiter."""
+    """Thread-safe "at most N calls/sec" limiter that ADAPTS in real time to
+    Dhan's own rate-limit signal (DH-904) instead of just retrying at the
+    same fixed pace and tripping it again.
 
-    def __init__(self, rate_per_sec):
-        self.rate = rate_per_sec
+    Every worker thread shares ONE instance. When any of them hits DH-904,
+    it calls penalize() -- this doubles the enforced gap between calls for
+    EVERY thread immediately, not just the one that got rate-limited (the
+    old behavior: a fixed short retry sleep on the one failing call, while
+    every other thread kept firing at the original pace right through the
+    outage, guaranteeing more 429s). Recovers back toward the configured
+    rate automatically once `recovery_after_s` passes without another hit.
+    """
+
+    def __init__(self, rate_per_sec, recovery_after_s=30):
+        self.base_min_interval = (1.0 / rate_per_sec) if rate_per_sec > 0 else 0
+        self.min_interval = self.base_min_interval
+        self.max_min_interval = self.base_min_interval * 16 if self.base_min_interval else 0
+        self.recovery_after_s = recovery_after_s
         self.lock = threading.Lock()
         self.last_called = 0
+        self.last_penalty = 0
 
     def wait(self):
         with self.lock:
             now = time.time()
-            wait_time = max(0, (1 / self.rate) - (now - self.last_called))
+            if (self.min_interval > self.base_min_interval
+                    and (now - self.last_penalty) > self.recovery_after_s):
+                # Quiet period since the last DH-904 -- step the pace back
+                # down toward normal instead of staying penalized forever.
+                self.min_interval = max(self.base_min_interval, self.min_interval / 2)
+                self.last_penalty = now
+            wait_time = max(0, self.min_interval - (now - self.last_called))
             if wait_time > 0:
                 time.sleep(wait_time)
             self.last_called = time.time()
+
+    def penalize(self):
+        """Call this the moment DH-904 is seen -- slows the WHOLE shared
+        pace down immediately for every thread, capped at 16x the base rate."""
+        with self.lock:
+            self.min_interval = min(self.max_min_interval, max(self.min_interval * 2, self.base_min_interval * 2))
+            self.last_penalty = time.time()
 
 
 def build_windows(start_date, n, step_days, window_days):
@@ -59,7 +87,15 @@ def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
     """One scrip's hourly candles for [from_date, to_date), market-hours only.
     Retries with backoff on any error. Returns (DataFrame, None) on success,
     or (None, reason) on failure -- reason is a short string explaining why,
-    not just a silent None."""
+    not just a silent None.
+
+    dhanhq's SDK never raises on a 429 -- it swallows it internally and
+    returns {'status': 'failure', 'remarks': {'error_code': 'DH-904', ...}}.
+    That's inspected explicitly below (not just str()'d into a generic
+    exception) so a real rate-limit hit can (a) penalize the shared
+    rate_limiter for every other in-flight thread, and (b) get a real
+    exponential backoff instead of the ~1s used for ordinary errors.
+    """
     for attempt in range(max_retries):
         try:
             rate_limiter.wait()
@@ -72,7 +108,14 @@ def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
                 to_date=to_date,
             )
             if resp["status"] != "success":
-                raise Exception(resp.get("remarks", "API failure"))
+                remarks = resp.get("remarks", "API failure")
+                if isinstance(remarks, dict) and remarks.get("error_code") == "DH-904":
+                    rate_limiter.penalize()
+                    if attempt < max_retries - 1:
+                        time.sleep(min(60, 5 * (2 ** attempt)))  # 5s, 10s, 20s, ...
+                        continue
+                    return None, f"rate limited (DH-904) after {max_retries} attempts: {remarks}"
+                raise Exception(remarks)
 
             df = pd.DataFrame(resp["data"])
             if df.empty:
@@ -178,7 +221,7 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
         # before you found out. Now every failure prints immediately
         # (tqdm.write, so it doesn't garble the bar) and the running
         # empty/error split is always visible in the postfix.
-        empty_count = error_count = 0
+        empty_count = error_count = rate_limited_count = 0
         pbar = tqdm(as_completed(futures), total=len(futures), desc="Fetching")
         for f in pbar:
             result, reason = f.result()
@@ -188,17 +231,20 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
                 success += 1
             else:
                 failed_reasons[f"{scrip} [{from_date}->{to_date}]"] = reason
-                is_empty = reason is not None and (
+                if reason is not None and "rate limited (DH-904)" in reason:
+                    rate_limited_count += 1
+                    tag = "⏳ DH-904"
+                elif reason is not None and (
                     "empty response" in reason or "outside market hours" in reason
-                )
-                if is_empty:
+                ):
                     empty_count += 1
                     tag = "∅ empty"
                 else:
                     error_count += 1
                     tag = "❌ error"
                 tqdm.write(f"  {tag}  {scrip} [{from_date}->{to_date}]: {reason}")
-            pbar.set_postfix(ok=success, empty=empty_count, err=error_count)
+            pbar.set_postfix(ok=success, empty=empty_count, err=error_count, rl=rate_limited_count,
+                             pace=f"{rate_limiter.min_interval:.2f}s/call")
 
     print(f"\nSuccess: {success}, Failures: {len(failed_reasons)}")
     if failed_reasons:
