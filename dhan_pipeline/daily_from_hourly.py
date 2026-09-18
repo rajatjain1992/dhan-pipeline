@@ -98,7 +98,6 @@ def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
             else:
-                print(f"❌ Failed: {row['scrip']} -> {e}")
                 return None, str(e)
 
 
@@ -172,7 +171,16 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
                                 market_end, max_retries)
                 futures[fut] = (row["scrip"], from_date, to_date)
 
-        for f in tqdm(as_completed(futures), total=len(futures), desc="Fetching"):
+        # Live counts on the bar itself (not just a summary at the end) --
+        # previously an empty response or a hard error was silently stashed
+        # in failed_reasons and only surfaced once the ENTIRE run finished,
+        # so a broken token or a dead endpoint burned every remaining call
+        # before you found out. Now every failure prints immediately
+        # (tqdm.write, so it doesn't garble the bar) and the running
+        # empty/error split is always visible in the postfix.
+        empty_count = error_count = 0
+        pbar = tqdm(as_completed(futures), total=len(futures), desc="Fetching")
+        for f in pbar:
             result, reason = f.result()
             scrip, from_date, to_date = futures[f]
             if result is not None:
@@ -180,6 +188,17 @@ def run_daily_from_hourly(cfg, scrip_mapping, start_date, n=1,
                 success += 1
             else:
                 failed_reasons[f"{scrip} [{from_date}->{to_date}]"] = reason
+                is_empty = reason is not None and (
+                    "empty response" in reason or "outside market hours" in reason
+                )
+                if is_empty:
+                    empty_count += 1
+                    tag = "∅ empty"
+                else:
+                    error_count += 1
+                    tag = "❌ error"
+                tqdm.write(f"  {tag}  {scrip} [{from_date}->{to_date}]: {reason}")
+            pbar.set_postfix(ok=success, empty=empty_count, err=error_count)
 
     print(f"\nSuccess: {success}, Failures: {len(failed_reasons)}")
     if failed_reasons:
