@@ -24,6 +24,7 @@ from .intraday import run_intraday, latest_intraday_date, run_intraday_reload_fo
 from .intraday_check import run_intraday_daily_check, compare_to_daily
 from .daily_from_hourly import run_daily_from_hourly
 from .fetch_plan import plan_dates, estimate_plan_bytes, FetchPlan
+from .health_check import run_data_health_check
 from .instruments import run_instrument_master
 from .daily_reload import run_daily_reload
 from .taxpnl import run_taxpnl_fno
@@ -57,6 +58,7 @@ __all__ = [
     "plan_dates",
     "estimate_plan_bytes",
     "FetchPlan",
+    "run_data_health_check",
     "run_instrument_master",
     "run_daily_reload",
     "run_taxpnl_fno",
