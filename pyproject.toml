@@ -16,6 +16,7 @@ dependencies = [
     "requests",
     "pytz",
     "gspread",
+    "openpyxl",
     "dhanhq",
     "google-cloud-bigquery",
     "pandas-gbq",

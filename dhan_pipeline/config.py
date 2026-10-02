@@ -28,6 +28,7 @@ class Config:
     bse_bhav_table: str = ""
     mcap_table: str = ""
     option_table: str = ""
+    fno_exits_table: str = ""
     sheet_key: str = ""
     list_worksheet: str = ""
     negative_worksheet: str = ""
@@ -85,3 +86,7 @@ class Config:
     @property
     def option_ref(self) -> str:
         return f"{self.project_id}.{self.dataset_id}.{self.option_table}"
+
+    @property
+    def fno_exits_ref(self) -> str:
+        return f"{self.project_id}.{self.dataset_id}.{self.fno_exits_table}"

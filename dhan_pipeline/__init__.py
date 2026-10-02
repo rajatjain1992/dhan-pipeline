@@ -25,6 +25,7 @@ from .intraday_check import run_intraday_daily_check, compare_to_daily
 from .daily_from_hourly import run_daily_from_hourly
 from .instruments import run_instrument_master
 from .daily_reload import run_daily_reload
+from .taxpnl import run_taxpnl_fno
 
 __all__ = [
     "Config",
@@ -52,4 +53,5 @@ __all__ = [
     "run_daily_from_hourly",
     "run_instrument_master",
     "run_daily_reload",
+    "run_taxpnl_fno",
 ]
