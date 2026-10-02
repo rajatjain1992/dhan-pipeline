@@ -23,6 +23,7 @@ from .options import run_options, latest_option_date
 from .intraday import run_intraday, latest_intraday_date, run_intraday_reload_for_flagged
 from .intraday_check import run_intraday_daily_check, compare_to_daily
 from .daily_from_hourly import run_daily_from_hourly
+from .fetch_plan import plan_dates, estimate_plan_bytes, FetchPlan
 from .instruments import run_instrument_master
 from .daily_reload import run_daily_reload
 from .taxpnl import run_taxpnl_fno
@@ -53,6 +54,9 @@ __all__ = [
     "run_intraday_daily_check",
     "compare_to_daily",
     "run_daily_from_hourly",
+    "plan_dates",
+    "estimate_plan_bytes",
+    "FetchPlan",
     "run_instrument_master",
     "run_daily_reload",
     "run_taxpnl_fno",
