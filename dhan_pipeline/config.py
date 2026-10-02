@@ -29,6 +29,7 @@ class Config:
     mcap_table: str = ""
     option_table: str = ""
     fno_exits_table: str = ""
+    index_constituents_table: str = ""
     sheet_key: str = ""
     list_worksheet: str = ""
     negative_worksheet: str = ""
@@ -90,3 +91,7 @@ class Config:
     @property
     def fno_exits_ref(self) -> str:
         return f"{self.project_id}.{self.dataset_id}.{self.fno_exits_table}"
+
+    @property
+    def index_constituents_ref(self) -> str:
+        return f"{self.project_id}.{self.dataset_id}.{self.index_constituents_table}"

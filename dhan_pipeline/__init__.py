@@ -26,6 +26,7 @@ from .daily_from_hourly import run_daily_from_hourly
 from .instruments import run_instrument_master
 from .daily_reload import run_daily_reload
 from .taxpnl import run_taxpnl_fno
+from .index_constituents import run_index_constituents
 
 __all__ = [
     "Config",
@@ -54,4 +55,5 @@ __all__ = [
     "run_instrument_master",
     "run_daily_reload",
     "run_taxpnl_fno",
+    "run_index_constituents",
 ]
