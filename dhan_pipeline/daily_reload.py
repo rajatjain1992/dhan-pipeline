@@ -11,7 +11,9 @@ Two modes:
       currently stored in BigQuery for that date (before it gets deleted).
       Scrips whose price moved get their ENTIRE lifetime history deleted +
       refetched (their whole series is stale post-split), everyone else
-      just gets the range reuploaded.
+      just gets the range reuploaded. Scrips with no row anywhere in the table
+      (new listings) are held out of the range upload and get their full
+      lifetime history instead.
 
 Every run also clears out any exchange='TEMP' rows first -- those are
 leftovers from the daily-from-hourly rollup path (`run_daily_from_hourly`),
@@ -81,6 +83,26 @@ def delete_temp(client, table_ref):
     client.query(
         f"DELETE FROM `{table_ref}` WHERE exchange = '{TEMP_EXCHANGE}'"
     ).result()
+
+
+def find_new_scrips(client, table_ref, scrips):
+    """Scrips in `scrips` with no real (non-TEMP) row anywhere in the table.
+
+    Scans only the `scrip` + `exchange` columns (clustered on scrip), so it is a
+    column read, not a table read.
+    """
+    from google.cloud import bigquery
+    scrips = sorted(set(scrips))
+    if not scrips:
+        return []
+    df = client.query(
+        f"SELECT DISTINCT scrip FROM `{table_ref}` "
+        f"WHERE scrip IN UNNEST(@scrips) AND exchange != '{TEMP_EXCHANGE}'",
+        job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ArrayQueryParameter("scrips", "STRING", scrips),
+        ]),
+    ).to_dataframe()
+    return sorted(set(scrips) - set(df["scrip"]))
 
 
 def _count_temp(client, table_ref):
@@ -223,6 +245,13 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
     in_range = fetched[(fetched["trade_date"] >= from_d) & (fetched["trade_date"] <= to_d)]
     check_date = in_range["trade_date"].min() if not in_range.empty else None
 
+    # New scrips (no rows anywhere in the table) are held back from the range
+    # upload and get their full lifetime history instead.
+    new_scrips = find_new_scrips(client, cfg.daily_ref, fetched["scrip"].unique())
+    if new_scrips:
+        print(f"\n🆕 {len(new_scrips)} new scrip(s) not in {cfg.daily_ref}: {new_scrips} "
+              f"-> will load full lifetime history.")
+
     flags = pd.DataFrame()
     flagged_scrips = []
     if check_date is not None:
@@ -261,7 +290,8 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
             delete_scrips(client, cfg.daily_ref, flagged_scrips)
 
     # ---- 4. Upload: range data for clean scrips, full lifetime refetch for flagged ----
-    clean_upload = in_range[~in_range["scrip"].isin(flagged_scrips)].copy()
+    lifetime_scrips = sorted(set(flagged_scrips) | set(new_scrips))
+    clean_upload = in_range[~in_range["scrip"].isin(lifetime_scrips)].copy()
     if dry_run:
         print(f"[DRY RUN] would upsert {len(clean_upload)} range rows for "
               f"{clean_upload['scrip'].nunique() if not clean_upload.empty else 0} clean scrips.")
@@ -272,27 +302,38 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
               f"{clean_upload['scrip'].nunique() if not clean_upload.empty else 0} clean scrips.")
 
     uploaded_lifetime = 0
-    if flagged_scrips:
+    if lifetime_scrips:
         if dry_run:
             print(f"[DRY RUN] would refetch + upsert full lifetime history for "
-                  f"{len(flagged_scrips)} flagged scrip(s) (no fetch performed in dry run).")
+                  f"{len(flagged_scrips)} flagged + {len(new_scrips)} new scrip(s) "
+                  f"(no fetch performed in dry run).")
         else:
-            flagged_mapping = scrip_mapping[scrip_mapping["scrip"].isin(flagged_scrips)]
+            lifetime_mapping = scrip_mapping[scrip_mapping["scrip"].isin(lifetime_scrips)]
             # security_id/exchange/instrument_type come from scrip_mapping, not BQ
-            # (BQ's copy for these scrips was just deleted).
+            # (BQ's copy for flagged scrips was just deleted; new scrips have none).
             lifetime_fetched, lifetime_failed = fetch_ohlcv(
-                cfg, flagged_mapping, lifetime_start, _today(),
-                desc="Lifetime refetch (flagged)")
+                cfg, lifetime_mapping, lifetime_start, _today(),
+                desc="Lifetime refetch (flagged + new)")
             uploaded_lifetime = bqmod.upsert_daily(cfg, client, lifetime_fetched)
             print(f"✅ Upserted {uploaded_lifetime} lifetime rows for "
-                  f"{len(flagged_scrips)} flagged scrip(s).")
+                  f"{len(flagged_scrips)} flagged + {len(new_scrips)} new scrip(s).")
             failed = failed + lifetime_failed
+
+            # A new scrip whose lifetime fetch came back empty must not lose
+            # today's range rows: fall back to the range data we already hold.
+            got = set(lifetime_fetched["scrip"]) if not lifetime_fetched.empty else set()
+            fallback = in_range[in_range["scrip"].isin(set(new_scrips) - got)]
+            if not fallback.empty:
+                n = bqmod.upsert_daily(cfg, client, fallback)
+                uploaded_lifetime += n
+                print(f"⚠️  Lifetime fetch empty for {fallback['scrip'].nunique()} new scrip(s); "
+                      f"uploaded {n} range rows instead.")
 
     if failed:
         print(f"\n⚠️  Failed to fetch {len(failed)} scrip(s): {failed}")
 
     return {"mode": "range", "fetched": len(fetched), "check_date": check_date,
-            "flagged_scrips": flagged_scrips, "flags": flags,
+            "flagged_scrips": flagged_scrips, "new_scrips": new_scrips, "flags": flags,
             "uploaded_range": uploaded_range, "uploaded_lifetime": uploaded_lifetime,
             "uploaded": uploaded_range + uploaded_lifetime, "failed": failed,
             "table": cfg.daily_ref, "dry_run": dry_run}
