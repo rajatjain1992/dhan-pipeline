@@ -4,7 +4,7 @@ Refactored from the proven notebook logic. Returns a tidy DataFrame plus the
 list of scrips that failed, so callers stay thin.
 
 DataFrame columns: scrip, exchange, security_id, trade_date, open, high, low,
-close, volume, row_id
+close, volume
 """
 import asyncio
 import hashlib
@@ -21,7 +21,7 @@ except Exception:  # tqdm optional
         return x
 
 OUT_COLS = ["scrip", "exchange", "security_id", "trade_date",
-            "open", "high", "low", "close", "volume", "row_id"]
+            "open", "high", "low", "close", "volume"]
 
 
 def generate_row_id(row):
@@ -95,7 +95,6 @@ async def _fetch_one(session, cfg, row, from_date, to_date, failed, rate_limiter
                 df["scrip"] = scrip_name
                 df["exchange"] = row["exc_seg"]
                 df["security_id"] = str(row["security_id"])
-                df["row_id"] = df.apply(generate_row_id, axis=1)
                 return df[OUT_COLS]
 
             if status == 429:  # rate limited

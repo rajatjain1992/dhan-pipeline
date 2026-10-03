@@ -19,7 +19,6 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from .auth import bq_client, dhan_client
-from .fetch import generate_row_id
 from . import bq as bqmod
 
 DATE_FMT = "%Y-%m-%d"
@@ -146,7 +145,7 @@ def fetch_hourly(connect, rate_limiter, row, from_date, to_date, interval,
 
 def aggregate_daily(intraday_df):
     """Roll up hourly bars to one daily OHLCV row per (trade_date, scrip,
-    exchange, security_id), plus the row_id used for the staging+MERGE upsert."""
+    exchange, security_id)."""
     df = intraday_df.copy()
     df["trade_date"] = df["timestamp"].dt.date
 
@@ -155,7 +154,6 @@ def aggregate_daily(intraday_df):
     ).agg(open=("open", "first"), high=("high", "max"),
           low=("low", "min"), close=("close", "last"), volume=("volume", "sum"))
 
-    daily["row_id"] = daily.apply(generate_row_id, axis=1)
     return daily
 
 

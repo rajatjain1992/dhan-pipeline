@@ -13,8 +13,10 @@ DAILY_SCHEMA = [
     bigquery.SchemaField("low", "FLOAT64", mode="NULLABLE"),
     bigquery.SchemaField("close", "FLOAT64", mode="NULLABLE"),
     bigquery.SchemaField("volume", "FLOAT64", mode="NULLABLE"),
-    bigquery.SchemaField("row_id", "STRING", mode="REQUIRED"),
 ]
+
+DAILY_KEY = ["scrip", "exchange", "security_id", "trade_date"]
+DAILY_COLS = DAILY_KEY + ["open", "high", "low", "close", "volume"]
 
 FLAG_SCHEMA = [
     bigquery.SchemaField("run_ts", "TIMESTAMP", mode="REQUIRED"),
@@ -55,15 +57,16 @@ def read_daily(cfg, client, scrips, from_date, to_date):
 
 
 def upsert_daily(cfg, client, df):
-    """Upsert `df` into the main daily table via a staging table + MERGE on row_id."""
+    """Upsert `df` into the main daily table via a staging table + MERGE on the natural key
+    (scrip, exchange, security_id, trade_date)."""
     if df.empty:
         return 0
 
     ensure_table(client, cfg.daily_ref, DAILY_SCHEMA)
 
-    df = df.copy()
+    df = df[DAILY_COLS].copy()
     df["security_id"] = df["security_id"].astype(np.int64)
-    df = df.drop_duplicates(subset=["scrip", "exchange", "security_id", "trade_date", "row_id"])
+    df = df.drop_duplicates(subset=DAILY_KEY, keep="last")
 
     client.load_table_from_dataframe(
         df, cfg.staging_ref,
@@ -79,7 +82,10 @@ def upsert_daily(cfg, client, df):
     merge_query = f"""
     MERGE `{cfg.daily_ref}` AS target
     USING `{cfg.staging_ref}` AS source
-    ON target.row_id = source.row_id
+    ON target.scrip = source.scrip
+       AND target.exchange = source.exchange
+       AND target.security_id = source.security_id
+       AND target.trade_date = source.trade_date
        AND target.trade_date BETWEEN @min_date AND @max_date
     WHEN MATCHED THEN UPDATE SET
         target.open = source.open,
@@ -88,9 +94,9 @@ def upsert_daily(cfg, client, df):
         target.close = source.close,
         target.volume = source.volume
     WHEN NOT MATCHED THEN
-        INSERT (scrip, exchange, security_id, trade_date, open, high, low, close, volume, row_id)
+        INSERT (scrip, exchange, security_id, trade_date, open, high, low, close, volume)
         VALUES (source.scrip, source.exchange, source.security_id, source.trade_date,
-                source.open, source.high, source.low, source.close, source.volume, source.row_id)
+                source.open, source.high, source.low, source.close, source.volume)
     """
     client.query(merge_query, job_config=bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("min_date", "DATE", min_date),
