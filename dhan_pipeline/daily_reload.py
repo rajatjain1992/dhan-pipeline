@@ -15,11 +15,13 @@ Two modes:
       (new listings) are held out of the range upload and get their full
       lifetime history instead.
 
-Every run also clears out any exchange='TEMP' rows first -- those are
-leftovers from the daily-from-hourly rollup path (`run_daily_from_hourly`),
-which tags its rows TEMP and lives in the same daily table. This module
-manages the "real" data, so stale TEMP rows are wiped before it does anything
-else, regardless of mode.
+Every run also clears out any exchange='TEMP' rows -- those are leftovers
+from the daily-from-hourly rollup path (`run_daily_from_hourly`) and the Kite
+EOD top-up, which tag their rows TEMP and live in the same daily table. This
+module manages the "real" data, so TEMP rows are wiped, but only at the last
+moment: after the Dhan fetch and the split/new-scrip checks have succeeded and
+immediately before the first real delete/upload. A failed or interrupted fetch
+therefore leaves the TEMP rows untouched. The split check ignores TEMP rows.
 
 `dry_run=True` runs the whole flow (fetch + split-check) but skips every
 DELETE/upsert against BigQuery -- prints what *would* happen instead, so you
@@ -142,7 +144,8 @@ def run_daily_reload(cfg, scrip_mapping, mode, from_date=None, to_date=None,
             range mode) start date. Empty results before a scrip's listing
             date are harmless.
         clear_temp: delete any exchange='TEMP' rows (leftovers from
-            run_daily_from_hourly) before doing anything else. On by default.
+            run_daily_from_hourly) just before the first delete/upload, i.e.
+            only once the fetch and checks have succeeded. On by default.
         dry_run: if True, still fetches from Dhan and runs the split-check
             (so you see exactly what would be flagged/deleted/uploaded), but
             skips every DELETE and upsert against BigQuery.
@@ -155,25 +158,14 @@ def run_daily_reload(cfg, scrip_mapping, mode, from_date=None, to_date=None,
     if dry_run:
         print("=== DRY RUN: no deletes or uploads will happen ===\n")
 
-    if clear_temp:
-        temp_n = _count_temp(client, cfg.daily_ref)
-        if temp_n:
-            if dry_run:
-                print(f"[DRY RUN] would delete {temp_n} exchange='TEMP' row(s).")
-            else:
-                delete_temp(client, cfg.daily_ref)
-                print(f"Deleted {temp_n} exchange='TEMP' row(s).")
-        else:
-            print("No exchange='TEMP' rows to clear.")
-
     if mode == "lifetime":
-        return _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run)
+        return _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run)  # delete_all wipes TEMP too
     if mode == "range":
         if not from_date or not to_date:
             raise ValueError("mode='range' requires from_date and to_date")
         return _run_range(cfg, client, scrip_mapping, from_date, to_date,
                           buffer_days, lifetime_start, flags_csv,
-                          write_flags_to_bq, dry_run)
+                          write_flags_to_bq, dry_run, clear_temp)
     raise ValueError(f"mode must be 'lifetime' or 'range', got {mode!r}")
 
 
@@ -221,8 +213,19 @@ def _run_lifetime(cfg, client, scrip_mapping, lifetime_start, dry_run):
             "dry_run": False}
 
 
+def _clear_temp(cfg, client, dry_run):
+    temp_n = _count_temp(client, cfg.daily_ref)
+    if not temp_n:
+        print("No exchange='TEMP' rows to clear.")
+    elif dry_run:
+        print(f"[DRY RUN] would delete {temp_n} exchange='TEMP' row(s).")
+    else:
+        delete_temp(client, cfg.daily_ref)
+        print(f"Deleted {temp_n} exchange='TEMP' row(s).")
+
+
 def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
-               lifetime_start, flags_csv, write_flags_to_bq, dry_run):
+               lifetime_start, flags_csv, write_flags_to_bq, dry_run, clear_temp=False):
     from_d, to_d = _to_date(from_date), _to_date(to_date)
     fetch_from = (from_d - timedelta(days=buffer_days)).strftime(DATE_FMT)
 
@@ -256,7 +259,8 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
     flagged_scrips = []
     if check_date is not None:
         scrips = fetched["scrip"].unique().tolist()
-        bq_check = bqmod.read_daily(cfg, client, scrips, check_date, check_date)
+        bq_check = bqmod.read_daily(cfg, client, scrips, check_date, check_date,
+                                    real_only=True)
         flags = detect_corporate_actions(cfg, fetched, bq_check, check_date)
         flagged_scrips = (sorted(flags[flags["reason"] == "mismatch"]["scrip"].unique())
                           if not flags.empty else [])
@@ -275,6 +279,10 @@ def _run_range(cfg, client, scrip_mapping, from_date, to_date, buffer_days,
                 print(f"   flags appended -> {cfg.flag_ref}")
     else:
         print(f"\n✅ No split/adjustment mismatch at {check_date}.")
+
+    # TEMP rows go only now: fetch and checks are done, the next step writes.
+    if clear_temp:
+        _clear_temp(cfg, client, dry_run)
 
     # ---- 3. Delete: the range for everyone, plus full lifetime for flagged scrips ----
     if dry_run:

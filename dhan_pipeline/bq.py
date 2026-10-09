@@ -37,16 +37,19 @@ def ensure_table(client, table_ref, schema):
         client.create_table(bigquery.Table(table_ref, schema=schema))
 
 
-def read_daily(cfg, client, scrips, from_date, to_date):
-    """Read stored daily rows for the given scrips + date range."""
+def read_daily(cfg, client, scrips, from_date, to_date, real_only=False):
+    """Read stored daily rows for the given scrips + date range.
+
+    real_only=True leaves out exchange='TEMP' placeholder rows."""
     scrips = list(scrips)
     if not scrips:
         return pd.DataFrame(columns=["scrip", "trade_date", "open", "high", "low", "close", "volume"])
+    temp_filter = "\n          AND exchange != 'TEMP'" if real_only else ""
     query = f"""
         SELECT scrip, trade_date, open, high, low, close, volume
         FROM `{cfg.daily_ref}`
         WHERE trade_date BETWEEN @from_date AND @to_date
-          AND scrip IN UNNEST(@scrips)
+          AND scrip IN UNNEST(@scrips){temp_filter}
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("from_date", "DATE", from_date),
