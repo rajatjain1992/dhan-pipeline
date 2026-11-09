@@ -123,11 +123,18 @@ def offset_to_str(n):
     return f"ATM+{n}" if n > 0 else f"ATM{n}"
 
 
-def get_trading_days(start, end):
-    """Weekdays in [start, end) that aren't NSE holidays. End is non-inclusive."""
+def get_trading_days(start, end, weekend="off"):
+    """Days in [start, end) that aren't NSE holidays. End is non-inclusive.
+
+    weekend="off" (default): weekdays only.
+    weekend="on": weekends too, for special sessions (e.g. Muhurat on a Sunday).
+    """
+    if weekend not in ("off", "on"):
+        raise ValueError(f"weekend must be 'off' or 'on', got {weekend!r}")
     days, d = [], start
     while d < end:
-        if d.weekday() < 5 and d not in NSE_HOLIDAYS:
+        is_weekday = d.weekday() < 5
+        if (is_weekday or weekend == "on") and d not in NSE_HOLIDAYS:
             days.append(d)
         d += timedelta(days=1)
     return days
@@ -356,7 +363,7 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
                 expiry_codes=(1, 2), offsets=range(-10, 11),
                 interval=1, tranche_days=5, bq_max_workers=4,
                 security_ticker="NIFTY", security_id=13,
-                per_call_pause=0.1, requests_per_sec=4):
+                per_call_pause=0.1, requests_per_sec=4, weekend="off"):
     """Download options for [start_date, end_date) and load to cfg.option_ref.
 
     Args:
@@ -368,6 +375,9 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
         expiry_codes, offsets, interval, tranche_days, bq_max_workers: knobs.
         requests_per_sec: shared cap on Dhan calls/sec across this whole run
             (lower this if you're still seeing empty-body / timeout errors).
+        weekend: "off" (default) fetches weekdays only. "on" also fetches
+            Saturdays/Sundays in the range, for special sessions. NSE holidays
+            are still skipped.
     """
     cfg.require("project_id", "dataset_id", "option_table", "dhan_access_token")
     table_ref = cfg.option_ref
@@ -384,7 +394,7 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
     bq = bq_client(cfg)
     ensure_table(bq, table_ref)
 
-    trading_days = get_trading_days(start, end)
+    trading_days = get_trading_days(start, end, weekend=weekend)
     already_done = get_already_loaded(bq, table_ref)
 
     pending_pairs = [(d, code) for d in trading_days for code in expiry_codes
