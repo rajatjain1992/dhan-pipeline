@@ -86,7 +86,10 @@ def classify_probe(intra, daily, tolerance=PROBE_TOLERANCE,
     m["f_low"] = m["low_i"] / m["low_d"]
     off_h = (m["f_high"] - 1).abs() > tolerance
     off_l = (m["f_low"] - 1).abs() > tolerance
-    agree = ((m["f_high"] / m["f_low"]) - 1).abs() <= factor_agreement
+    # same side of 1: a factor moves high and low the same way; a narrow intraday
+    # range (high < 1, low > 1) is a data gap, not a split
+    agree = ((((m["f_high"] / m["f_low"]) - 1).abs() <= factor_agreement)
+             & ((m["f_high"] - 1) * (m["f_low"] - 1) > 0))
     m["verdict"] = "ok"
     m.loc[off_h | off_l, "verdict"] = "diff"
     m.loc[off_h & off_l & agree, "verdict"] = "split"

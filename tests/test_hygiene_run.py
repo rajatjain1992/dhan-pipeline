@@ -57,6 +57,24 @@ class DayFactors(unittest.TestCase):
         self.assertTrue(fix.empty)
         self.assertEqual(list(skipped["trade_date"]), [days(10)[7]])
 
+    def test_split_scales_volume_even_if_daily_volume_unadjusted(self):
+        intra, daily = frames("P", 8, ex_idx=5, f=2.0, vol_scaled=False)
+        fix, _ = hr.day_factors(intra, daily)
+        self.assertTrue((abs(fix["vf"] - 2.0) < 1e-9).all())
+
+    def test_share_ratio(self):
+        for f in (2.0, 2.0015, 10.0, 0.1, 1.5, 0.2, 5 / 3):
+            self.assertTrue(hr.is_share_ratio(f), f)
+        for f in (1.031, 3.186, 2.801, 1.017, 1.008, 4.942, 1.627, 1.238, 0.117):
+            self.assertFalse(hr.is_share_ratio(f), f)
+
+    def test_narrow_intraday_range_is_not_a_split(self):
+        intra, daily = frames("N", 10, ex_idx=0, f=1.0)
+        intra.loc[:, "high"] *= 0.993                     # intraday missed both extremes
+        intra.loc[:, "low"] *= 1.007
+        fix, skipped = hr.day_factors(intra, daily)
+        self.assertTrue(fix.empty and skipped.empty)
+
     def test_reverse_split_factor_below_one(self):
         intra, daily = frames("CC", 6, ex_idx=4, f=0.1)
         fix, _ = hr.day_factors(intra, daily)

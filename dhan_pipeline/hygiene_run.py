@@ -29,6 +29,16 @@ MIN_RUN_DAYS = 3                  # a factor must repeat on >= this many days to
 RUN_MATCH = 0.005                 # days whose factors agree within 0.5% share a run
 VOLUME_MATCH = 0.05               # volume scaled only if daily volume shows the factor within 5%
 UPDATE_CHUNK = 20000              # scrip-days per UPDATE statement
+SHARE_RATIO_MATCH = 0.002         # f within 0.2% of p/q (p, q <= 10) = split/bonus share ratio
+
+
+def is_share_ratio(f, match=SHARE_RATIO_MATCH, max_term=10):
+    """True when f is a split/bonus share ratio such as 2, 10, 3/2 or 1/5.
+    Those change the share count, so volume moves by f too (verified: a fresh
+    Dhan download of a 2:1 split has 2x the old volume). Demerger, rights and
+    dividend factors (1.031, 3.186, 2.801 ...) change price only."""
+    return any(abs(f * q / p - 1) <= match
+               for p in range(1, max_term + 1) for q in range(1, max_term + 1) if p != q)
 
 
 def day_factors(intra, daily, tolerance=PROBE_TOLERANCE, factor_agreement=FACTOR_AGREEMENT,
@@ -41,8 +51,9 @@ def day_factors(intra, daily, tolerance=PROBE_TOLERANCE, factor_agreement=FACTOR
       fix     : divide that day's prices by f, multiply its volume by vf
       skipped : 'split' days left alone (fewer than `min_run` days share the factor)
     f  = sqrt(f_high * f_low), the day's intraday/daily price ratio.
-    vf = f when the day's intraday/daily volume ratio is ~1/f (daily volume was
-         scaled too), else 1 (rights/dividend-type adjustments move price only).
+    vf = f when f is a share ratio (split/bonus) or the day's intraday/daily volume
+         ratio is ~1/f (daily volume was scaled too), else 1 (rights, demerger and
+         dividend-type adjustments move price only).
     """
     cols = ["scrip", "trade_date", "f", "vf"]
     empty = pd.DataFrame(columns=cols)
@@ -69,6 +80,7 @@ def day_factors(intra, daily, tolerance=PROBE_TOLERANCE, factor_agreement=FACTOR
     ratio = split["vi"].astype(float) / split["vd"].astype(float)
     scaled = (ratio * split["f"] - 1).abs()
     use = (split["vd"].astype(float) > 0) & (scaled <= volume_match) & (scaled < (ratio - 1).abs())
+    use |= split["f"].map(is_share_ratio)          # split/bonus: Dhan's fresh download scales volume
     split["vf"] = 1.0
     split.loc[use, "vf"] = split.loc[use, "f"]
 
