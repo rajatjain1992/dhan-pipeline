@@ -75,11 +75,28 @@ class DayFactors(unittest.TestCase):
         fix, skipped = hr.day_factors(intra, daily)
         self.assertTrue(fix.empty and skipped.empty)
 
-    def test_reverse_split_factor_below_one(self):
-        intra, daily = frames("CC", 6, ex_idx=4, f=0.1)
+    def test_intraday_below_daily_is_daily_stale_not_fixed(self):
+        # JSWDULUX: intraday re-downloaded (adjusted 1:10), daily table still unadjusted
+        intra, daily = frames("JSW", 8, ex_idx=5, f=0.1)
+        fix, skipped = hr.day_factors(intra, daily)
+        self.assertTrue(fix.empty)
+        self.assertEqual(len(skipped), 5)
+        self.assertTrue((skipped["reason"] == "daily_stale").all())
+
+    def test_small_factor_never_scales_volume(self):
+        # NATCOPHARM 1.008: daily volume 1/1.008 is noise, not evidence
+        intra, daily = frames("NP", 8, ex_idx=5, f=1.008, vol_scaled=True)
         fix, _ = hr.day_factors(intra, daily)
-        self.assertEqual(len(fix), 4)
-        self.assertTrue((abs(fix["f"] - 0.1) < 1e-9).all())
+        self.assertEqual(len(fix), 5)
+        self.assertTrue((fix["vf"] == 1.0).all())
+
+    def test_volume_factor_voted_per_run(self):
+        # rights-type 1.017, price only; one day's volume happens to look scaled
+        intra, daily = frames("H", 10, ex_idx=8, f=1.017, vol_scaled=False)
+        intra.loc[3, "volume"] /= 1.017
+        fix, _ = hr.day_factors(intra, daily)
+        self.assertEqual(len(fix), 8)
+        self.assertTrue((fix["vf"] == 1.0).all())
 
     def test_after_fix_nothing_left(self):
         intra, daily = frames("X", 10, ex_idx=6, f=2.0)
@@ -138,6 +155,14 @@ class FixByFactor(unittest.TestCase):
         self.assertEqual(out["rows_updated"], 150)
         self.assertEqual(out["still_wrong"], [])
         self.assertEqual(sum(s.count("SUM(volume)") for s in fake.sql), 2)   # read + verify
+
+    def test_daily_stale_not_reported_still_wrong(self):
+        intra, daily = frames("JSW", 10, ex_idx=6, f=0.1)
+        fake = FakeClient(Router(intra, daily))
+        out = hr.fix_by_factor(cfg(), fake, ["JSW"], 15, today=date(2026, 11, 17))
+        self.assertFalse(any(is_write(s) for s in fake.sql))
+        self.assertEqual(out["daily_stale"], ["JSW"])
+        self.assertEqual(out["still_wrong"], [])
 
     def test_dry_run_writes_nothing(self):
         intra, daily = frames("X", 10, ex_idx=6, f=2.0)

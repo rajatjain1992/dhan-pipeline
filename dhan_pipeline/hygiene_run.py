@@ -47,28 +47,27 @@ def day_factors(intra, daily, tolerance=PROBE_TOLERANCE, factor_agreement=FACTOR
 
     intra : rolled-up intraday days: scrip, trade_date, high, low, volume
     daily : daily rows:              scrip, trade_date, high, low, volume
-    Returns (fix, skipped), both with columns scrip, trade_date, f, vf:
+    Returns (fix, skipped), both with columns scrip, trade_date, f, vf (+ reason in skipped):
       fix     : divide that day's prices by f, multiply its volume by vf
-      skipped : 'split' days left alone (fewer than `min_run` days share the factor)
+      skipped : 'split' days left alone. reason 'one_off': fewer than `min_run`
+                days share the factor. reason 'daily_stale': f < 1, intraday is
+                LOWER than daily. Corporate-action adjustment only ever lowers past
+                prices, so the higher side is the stale one: here the daily table
+                is unadjusted (JSWDULUX 1:10, Nov 2026) and intraday must not move.
     f  = sqrt(f_high * f_low), the day's intraday/daily price ratio.
     vf = f when f is a share ratio (split/bonus) or the day's intraday/daily volume
          ratio is ~1/f (daily volume was scaled too), else 1 (rights, demerger and
-         dividend-type adjustments move price only).
+         dividend-type adjustments move price only). Decided per run of days
+         sharing a factor (majority), so one noisy day cannot differ from its run.
     """
     cols = ["scrip", "trade_date", "f", "vf"]
     empty = pd.DataFrame(columns=cols)
     comp = classify_probe(intra, daily, tolerance, factor_agreement)
     split = comp[comp["verdict"] == "split"].copy()
     if split.empty:
-        return empty, empty.copy()
+        return empty, empty.assign(reason=pd.Series(dtype=str))
     split["f"] = (split["f_high"] * split["f_low"]) ** 0.5
-
-    keep = []
-    for _, g in split.groupby("scrip"):
-        f = g["f"].to_numpy()
-        same = (abs(f[:, None] / f[None, :] - 1) <= run_match).sum(axis=1)
-        keep.extend(g.index[same >= min_run])
-    split["ok"] = split.index.isin(keep)
+    split = split.reset_index(drop=True)
 
     vols = []
     for df, name in ((intra, "vi"), (daily, "vd")):
@@ -80,12 +79,25 @@ def day_factors(intra, daily, tolerance=PROBE_TOLERANCE, factor_agreement=FACTOR
     ratio = split["vi"].astype(float) / split["vd"].astype(float)
     scaled = (ratio * split["f"] - 1).abs()
     use = (split["vd"].astype(float) > 0) & (scaled <= volume_match) & (scaled < (ratio - 1).abs())
+    use &= (split["f"] - 1).abs() > 2 * volume_match   # under 10% the volume test is noise
     use |= split["f"].map(is_share_ratio)          # split/bonus: Dhan's fresh download scales volume
-    split["vf"] = 1.0
-    split.loc[use, "vf"] = split.loc[use, "f"]
+    split["use"] = use.to_numpy()
 
-    fix = split[split["ok"]][cols].reset_index(drop=True)
-    skipped = split[~split["ok"]][cols].reset_index(drop=True)
+    split["ok"] = False
+    split["vf"] = 1.0
+    for _, g in split.groupby("scrip"):
+        f = g["f"].to_numpy()
+        same = abs(f[:, None] / f[None, :] - 1) <= run_match
+        n = same.sum(axis=1)
+        share = (same @ g["use"].to_numpy().astype(float)) / n   # volume vote within the run
+        split.loc[g.index, "ok"] = n >= min_run
+        split.loc[g.index[share > 0.5], "vf"] = g["f"].to_numpy()[share > 0.5]
+
+    split["reason"] = ""
+    split.loc[~split["ok"], "reason"] = "one_off"
+    split.loc[split["f"] < 1, "reason"] = "daily_stale"
+    fix = split[split["reason"] == ""][cols].reset_index(drop=True)
+    skipped = split[split["reason"] != ""][cols + ["reason"]].reset_index(drop=True)
     return fix, skipped
 
 
@@ -135,17 +147,18 @@ def fix_by_factor(cfg, client, scrips, interval, today=None, dry_run=False,
     """
     from google.cloud import bigquery
     today = today or date.today()
-    out = {"fixed_days": 0, "rows_updated": 0, "still_wrong": [],
-           "skipped": pd.DataFrame(columns=["scrip", "trade_date", "f", "vf"]),
+    out = {"fixed_days": 0, "rows_updated": 0, "still_wrong": [], "daily_stale": [],
+           "skipped": pd.DataFrame(columns=["scrip", "trade_date", "f", "vf", "reason"]),
            "factors": pd.DataFrame(columns=["scrip", "trade_date", "f", "vf"])}
     if not scrips:
         return out
     intra, daily = _history_reads(cfg, client, scrips, interval, today, max_bytes)
     fix, skipped = day_factors(intra, daily)
-    out.update(fixed_days=len(fix), skipped=skipped, factors=fix)
+    stale = sorted(set(skipped.loc[skipped["reason"] == "daily_stale", "scrip"]))
+    out.update(fixed_days=len(fix), skipped=skipped, factors=fix, daily_stale=stale)
     if fix.empty or dry_run:
         # nothing written: report the scrips a factor cannot fix
-        out["still_wrong"] = sorted(set(skipped["scrip"]) - set(fix["scrip"]))
+        out["still_wrong"] = sorted(set(skipped["scrip"]) - set(fix["scrip"]) - set(stale))
         return out
 
     sql = factor_update_sql(cfg.intraday_ref)
@@ -164,7 +177,8 @@ def fix_by_factor(cfg, client, scrips, interval, today=None, dry_run=False,
     touched = sorted(set(fix["scrip"]) | set(skipped["scrip"]))
     intra2, daily2 = _history_reads(cfg, client, touched, interval, today, max_bytes)
     after = classify_probe(intra2, daily2)
-    out["still_wrong"] = sorted(set(after.loc[after["verdict"] == "split", "scrip"]))
+    left = after[(after["verdict"] == "split") & (after["f_high"] > 1)]   # f < 1 = daily side
+    out["still_wrong"] = sorted(set(left["scrip"]) - set(stale))
     return out
 
 
@@ -239,6 +253,8 @@ def run_hygiene(cfg, scrip_mapping, mapping_15m=None, mapping_1m=None,
         if changed:
             first = fac.sort_values("trade_date").groupby("scrip").first()
             print("   " + ", ".join(f"{s} /{r['f']:.3f}" for s, r in first.iterrows()))
+        if fx["daily_stale"]:
+            print(f"   daily table stale (intraday left alone), reload daily for: {fx['daily_stale']}")
 
         reload = None
         if fx["still_wrong"] and not dry_run:
