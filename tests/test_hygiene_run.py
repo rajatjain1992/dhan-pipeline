@@ -219,5 +219,42 @@ class RunHygiene(unittest.TestCase):
         self.assertEqual(out[1]["fix"]["still_wrong"], ["C"])
 
 
+class DailyStale(unittest.TestCase):
+    def test_refresh_daily_upserts_only_those_scrips(self):
+        sm = pd.DataFrame({"scrip": ["JSW", "OTHER"], "security_id": ["1467", "1"],
+                           "exc_seg": "NSE_EQ", "instrument_type": "EQUITY"})
+        fetched = pd.DataFrame({"scrip": ["JSW"], "close": [300.0]})
+        with mock.patch("dhan_pipeline.fetch.fetch_ohlcv", return_value=(fetched, [])) as f,              mock.patch("dhan_pipeline.bq.upsert_daily", return_value=1) as up:
+            out = hr.refresh_daily(cfg(), FakeClient(lambda sql: None), sm, ["JSW", "GONE"],
+                                   today=date(2026, 11, 17))
+        self.assertEqual(list(f.call_args.args[1]["scrip"]), ["JSW"])
+        self.assertEqual(f.call_args.args[2], "2001-01-01")
+        self.assertEqual(up.call_args.args[0].staging_table, "daily_staging")
+        self.assertEqual(out, {"scrips": ["JSW"], "rows": 1, "missing": ["GONE"], "failed": []})
+
+    def test_refresh_daily_dry_run_fetches_nothing(self):
+        sm = pd.DataFrame({"scrip": ["JSW"]})
+        with mock.patch("dhan_pipeline.fetch.fetch_ohlcv") as f:
+            hr.refresh_daily(cfg(), None, sm, ["JSW"], dry_run=True)
+        f.assert_not_called()
+
+    def test_run_hygiene_reloads_daily_then_rechecks(self):
+        intra, daily = frames("JSW", 40, ex_idx=36, f=0.1)    # intraday adjusted, daily stale
+        router = Router(intra, daily, flags=[])
+
+        def refresh(cfg_, client, sm, scrips, today, dry_run):
+            router.daily = intra.copy()                     # Dhan's fresh daily = adjusted
+            return {"scrips": list(scrips), "rows": 40, "missing": []}
+        fake = FakeClient(router)
+        m = pd.DataFrame({"scrip": ["JSW"]})
+        with mock.patch("dhan_pipeline.hygiene_run.bq_client", return_value=fake),              mock.patch("dhan_pipeline.hygiene.bq_client", return_value=fake),              mock.patch("dhan_pipeline.hygiene_run.refresh_daily", side_effect=refresh) as rd:
+            out = hr.run_hygiene(cfg(), m, m, today=date(2026, 10, 15), cleanup=False)
+        rd.assert_called_once()
+        self.assertFalse(any(s.startswith("UPDATE") for s in fake.sql))   # intraday never moved
+        again = out[15]["daily"]["recheck"]
+        self.assertEqual(again["daily_stale"], [])
+        self.assertEqual(again["fixed_days"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

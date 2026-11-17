@@ -182,9 +182,40 @@ def fix_by_factor(cfg, client, scrips, interval, today=None, dry_run=False,
     return out
 
 
+DAILY_LIFETIME_START = "2001-01-01"
+
+
+def refresh_daily(cfg, client, scrip_mapping, scrips, today=None, dry_run=False):
+    """Re-download the FULL daily history of `scrips` from Dhan and upsert it.
+
+    For scrips whose daily table is stale (intraday below daily, JSWDULUX Nov
+    2026). No delete: upsert_daily MERGEs on scrip/exchange/security_id/date,
+    so only these scrips' rows change, and fetch_ohlcv keeps the adjusted row
+    when Dhan sends a day twice. Staging table: cfg.staging_table, else
+    '<daily_table>_staging'. Returns dict: scrips, rows, missing (not in mapping).
+    """
+    from dataclasses import replace
+    from . import bq as bqmod
+    from .fetch import fetch_ohlcv
+    today = today or date.today()
+    names = set(scrip_mapping["scrip"].astype(str).str.strip())
+    m = scrip_mapping[scrip_mapping["scrip"].astype(str).str.strip().isin(scrips)]
+    out = {"scrips": sorted(set(scrips) & names), "rows": 0,
+           "missing": sorted(set(scrips) - names)}
+    if m.empty or dry_run:
+        return out
+    cfg_d = replace(cfg, staging_table=cfg.staging_table or f"{cfg.daily_table}_staging")
+    fetched, failed = fetch_ohlcv(cfg_d, m, DAILY_LIFETIME_START, today.strftime("%Y-%m-%d"),
+                                  desc="Daily refetch", probe=None)
+    out["failed"] = failed
+    if not fetched.empty:
+        out["rows"] = bqmod.upsert_daily(cfg_d, client, fetched)
+    return out
+
+
 def run_hygiene(cfg, scrip_mapping, mapping_15m=None, mapping_1m=None,
                 cleanup="monday", today=None, cascade_days=3, max_scrips=25,
-                redownload_fallback=True, dry_run=False, verbose=False,
+                redownload_fallback=True, fix_daily=True, dry_run=False, verbose=False,
                 max_bytes=DEFAULT_MAX_BYTES):
     """One call, run daily after the intraday load.
 
@@ -196,6 +227,9 @@ def run_hygiene(cfg, scrip_mapping, mapping_15m=None, mapping_1m=None,
       4. verify   : re-check the fixed scrips
       5. fallback : 15m scrips still wrong are re-downloaded (15-day windows);
                     1m is never re-downloaded (its history is older than Dhan keeps)
+      6. daily    : scrips whose DAILY table is stale (intraday below daily) get
+                    their full daily history re-downloaded and upserted, then
+                    re-checked (fix_daily=False only reports them)
 
     cfg: needs daily_table, intraday_table, flag_table (cfg_intraday).
     scrip_mapping: the FULL sheet list (cleanup). mapping_15m / mapping_1m: the
@@ -210,6 +244,7 @@ def run_hygiene(cfg, scrip_mapping, mapping_15m=None, mapping_1m=None,
 
     tag = "[DRY RUN] " if dry_run else ""
     report = {}
+    daily_done = {}
 
     if cleanup is True or (cleanup == "monday" and today.weekday() == 0):
         with quiet():
@@ -253,8 +288,27 @@ def run_hygiene(cfg, scrip_mapping, mapping_15m=None, mapping_1m=None,
         if changed:
             first = fac.sort_values("trade_date").groupby("scrip").first()
             print("   " + ", ".join(f"{s} /{r['f']:.3f}" for s, r in first.iterrows()))
+        daily = None
         if fx["daily_stale"]:
-            print(f"   daily table stale (intraday left alone), reload daily for: {fx['daily_stale']}")
+            stale = fx["daily_stale"]
+            if not fix_daily:
+                print(f"   daily table stale (intraday left alone), reload daily for: {stale}")
+            else:
+                new = [s for s in stale if s not in daily_done]
+                if new:
+                    with quiet():
+                        r = refresh_daily(cfg, client, scrip_mapping, new, today, dry_run)
+                    daily_done.update({s: r for s in new})
+                    print(f"   {tag}daily table stale -> full daily history re-downloaded for "
+                          f"{r['scrips']} ({r['rows']} rows)"
+                          + (f"; not in sheet: {r['missing']}" if r["missing"] else ""))
+                if not dry_run:
+                    with quiet():
+                        again = fix_by_factor(cfg, client, stale, interval, today, False, max_bytes)
+                    left = sorted(set(again["daily_stale"]) | set(again["still_wrong"]))
+                    print(f"   after daily reload: {again['fixed_days']} intraday days fixed, "
+                          f"still off: {left if left else 'none'}")
+                    daily = {"refetch": {s: daily_done.get(s) for s in stale}, "recheck": again}
 
         reload = None
         if fx["still_wrong"] and not dry_run:
@@ -266,5 +320,6 @@ def run_hygiene(cfg, scrip_mapping, mapping_15m=None, mapping_1m=None,
                 print(f"   re-downloaded: {reload.get('eligible', [])}")
             else:
                 print(f"   NOT fixed, check by hand: {fx['still_wrong']}")
-        report[interval] = {"probe": probe, "found": found, "fix": fx, "reload": reload}
+        report[interval] = {"probe": probe, "found": found, "fix": fx, "reload": reload,
+                            "daily": daily}
     return report
