@@ -74,7 +74,7 @@ class ClassifyOrphans(unittest.TestCase):
         self.stored = pd.DataFrame({
             "scrip": ["AAA", "OLDNAME", "GONE", "NIFTY"],
             "security_id": [1, 2, 3, 13],      # daily stores INTEGER
-            "rows": [10, 20, 30, 40],
+            "n_rows": [10, 20, 30, 40],
             "first_date": [_d("2024-01-01")] * 4, "last_date": [_d("2026-11-14")] * 4})
 
     def test_classify(self):
@@ -163,7 +163,7 @@ class ReconcileRunner(unittest.TestCase):
     def router(self, sql):
         if "GROUP BY scrip, security_id" in sql:
             return pd.DataFrame({"scrip": ["AAA", "OLDNAME", "GONE"], "security_id": ["1", "2", "3"],
-                                 "rows": [5, 6, 7],
+                                 "n_rows": [5, 6, 7],
                                  "first_date": [_d("2024-01-01")] * 3,
                                  "last_date": [_d("2026-11-14")] * 3})
         if sql.startswith("SELECT COUNT(*)"):

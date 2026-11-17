@@ -300,7 +300,7 @@ def stored_scrips(cfg, client, name, max_bytes=DEFAULT_MAX_BYTES):
     where = f"WHERE exchange != '{TEMP_EXCHANGE}'" if name == "daily" else ""
     return _query(client, f"""
         SELECT scrip, CAST(security_id AS STRING) AS security_id,
-               COUNT(*) AS rows, MIN(trade_date) AS first_date, MAX(trade_date) AS last_date
+               COUNT(*) AS n_rows, MIN(trade_date) AS first_date, MAX(trade_date) AS last_date
         FROM `{ref}` {where}
         GROUP BY scrip, security_id
     """, [], max_bytes)
@@ -354,13 +354,13 @@ def run_reconcile_scrips(cfg, scrip_mapping, tables=("daily", "intraday"),
         dropped = orphans[orphans["kind"] == "dropped"]
         print(f"\n[{name}] {ref}: {stored['scrip'].nunique()} stored scrips, "
               f"{len(renamed)} renamed, {len(dropped)} dropped "
-              f"({int(orphans['rows'].sum()) if not orphans.empty else 0} rows).")
+              f"({int(orphans['n_rows'].sum()) if not orphans.empty else 0} rows).")
         for _, r in renamed.iterrows():
             print(f"  renamed  {r['scrip']} -> {r['new_scrip']}  (sid {r['security_id']}, "
-                  f"{r['rows']} rows {r['first_date']}..{r['last_date']})")
+                  f"{r['n_rows']} rows {r['first_date']}..{r['last_date']})")
         for _, r in dropped.iterrows():
             print(f"  dropped  {r['scrip']}  (sid {r['security_id']}, "
-                  f"{r['rows']} rows {r['first_date']}..{r['last_date']})")
+                  f"{r['n_rows']} rows {r['first_date']}..{r['last_date']})")
 
         done = {"renamed": 0, "deleted_overlap": 0, "archived": 0, "deleted": 0}
         if dry_run or orphans.empty:
