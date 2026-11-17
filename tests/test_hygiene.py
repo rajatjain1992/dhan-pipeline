@@ -110,9 +110,12 @@ class FakeClient:
     """Records SQL; answers SELECTs from a router(sql) -> DataFrame."""
     def __init__(self, router, dml_rows=None):
         self.sql, self.router, self.dml_rows = [], router, dml_rows or {}
+        self.params = []
 
     def query(self, sql, job_config=None):
         self.sql.append(" ".join(sql.split()))
+        qp = getattr(job_config, "query_parameters", None) or []
+        self.params.append({q.name: getattr(q, "values", getattr(q, "value", None)) for q in qp})
         head = self.sql[-1].split()[0].upper()
         if head in ("DELETE", "UPDATE", "INSERT"):
             return FakeJob(n=self.dml_rows.get(head, 0))
@@ -202,6 +205,44 @@ class ReconcileRunner(unittest.TestCase):
         dropped_deletes = [s for s in fake.sql if s.startswith("DELETE FROM `p.d.daily` WHERE scrip IN")]
         self.assertEqual(dropped_deletes, [])
         self.assertEqual(out["daily"]["deleted"], 0)
+
+
+class ReconcileBatchAndSharedName(unittest.TestCase):
+    """Many renames -> still 2 statements; HEG under two security_ids is split
+    correctly (1336 renamed to HEGAM, 7368 dropped)."""
+    def router(self, sql):
+        if "GROUP BY scrip, security_id" in sql:
+            return pd.DataFrame({
+                "scrip": ["LTIM", "INFIBEAM", "SEQUENT", "HEG", "HEG"],
+                "security_id": ["17818", "16249", "14296", "1336", "7368"],
+                "n_rows": [1, 2, 3, 4, 5],
+                "first_date": [_d("2024-01-01")] * 5, "last_date": [_d("2026-09-21")] * 5})
+        if sql.startswith("SELECT COUNT(*)"):
+            return pd.DataFrame({"n": [5]})
+        if sql.startswith("CREATE"):
+            return pd.DataFrame()
+        raise AssertionError(sql)
+
+    mapping = pd.DataFrame({"scrip": ["LTM", "CCAVENUE", "VIYASH", "HEGAM"],
+                            "security_id": ["17818", "16249", "14296", "1336"]})
+
+    def test(self):
+        fake = FakeClient(self.router, dml_rows={"INSERT": 5, "DELETE": 5, "UPDATE": 4})
+        with mock.patch.object(h, "bq_client", return_value=fake):
+            out = h.run_reconcile_scrips(cfg(), self.mapping, tables=("intraday",), dry_run=False)
+        kinds = [s.split()[0].upper() for s in fake.sql if is_write(s)]
+        self.assertEqual(kinds, ["DELETE", "UPDATE", "CREATE", "INSERT", "DELETE"])
+        upd = fake.params[[i for i, s in enumerate(fake.sql) if s.startswith("UPDATE")][0]]
+        pairs = dict(zip(upd["keys"], upd["news"]))
+        self.assertEqual(pairs, {"LTIM|17818": "LTM", "INFIBEAM|16249": "CCAVENUE",
+                                 "SEQUENT|14296": "VIYASH", "HEG|1336": "HEGAM"})
+        drop = fake.params[[i for i, s in enumerate(fake.sql)
+                            if s.startswith("DELETE FROM `p.d.intra` WHERE")][0]]
+        self.assertEqual(drop["keys"], ["HEG|7368"])      # only the dropped id, not HEG|1336
+        for s in fake.sql:
+            if is_write(s) and not s.startswith("CREATE"):
+                self.assertIn("IN UNNEST(@keys)" if "UPDATE" not in s[:6] else "= m.k", s)
+        self.assertEqual(out["intraday"]["renamed"], 4)
 
 
 if __name__ == "__main__":

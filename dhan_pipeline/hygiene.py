@@ -306,22 +306,49 @@ def stored_scrips(cfg, client, name, max_bytes=DEFAULT_MAX_BYTES):
     """, [], max_bytes)
 
 
+def _row_key(alias=""):
+    """'SCRIP|security_id' -- a scrip name can carry two security_ids (HEG did),
+    so every statement matches the pair, never the name alone."""
+    a = f"{alias}." if alias else ""
+    return f"CONCAT({a}scrip, '|', CAST({a}security_id AS STRING))"
+
+
+def _pair_keys(frame):
+    return [f"{s}|{i}" for s, i in zip(frame["scrip"], frame["security_id"])]
+
+
+# @keys[i] = 'OLD|sid' is renamed to @news[i]. `scrip IN UNNEST(@olds)` is
+# redundant with the key match but lets BigQuery prune on the scrip cluster.
+_RENAME_MAP = "(SELECT k, @news[OFFSET(i)] AS new_name FROM UNNEST(@keys) AS k WITH OFFSET i)"
+
+
 def _rename_sql(ref, name):
+    """Two statements per table, however many scrips were renamed."""
     keys = TABLE_KEYS[name]
     key_match = " AND ".join(
         f"CAST(n.{k} AS STRING) = CAST(o.{k} AS STRING)" if k == "security_id" else f"n.{k} = o.{k}"
         for k in keys)
     delete_overlap = f"""
         DELETE FROM `{ref}` o
-        WHERE o.scrip = @old AND o.trade_date BETWEEN @lo AND @hi
-          AND EXISTS (SELECT 1 FROM `{ref}` n
-                      WHERE n.scrip = @new AND n.trade_date BETWEEN @lo AND @hi AND {key_match})
+        WHERE o.scrip IN UNNEST(@olds) AND {_row_key('o')} IN UNNEST(@keys)
+          AND o.trade_date BETWEEN @lo AND @hi
+          AND EXISTS (SELECT 1 FROM `{ref}` n, {_RENAME_MAP} m
+                      WHERE m.k = {_row_key('o')} AND n.scrip = m.new_name
+                        AND n.scrip IN UNNEST(@news)
+                        AND n.trade_date BETWEEN @lo AND @hi AND {key_match})
     """
     update = f"""
-        UPDATE `{ref}` SET scrip = @new
-        WHERE scrip = @old AND trade_date BETWEEN @lo AND @hi
+        UPDATE `{ref}` t SET scrip = m.new_name
+        FROM {_RENAME_MAP} m
+        WHERE t.scrip IN UNNEST(@olds) AND {_row_key('t')} = m.k
+          AND t.trade_date BETWEEN @lo AND @hi
     """
     return delete_overlap, update
+
+
+def _dropped_where():
+    return (f"WHERE scrip IN UNNEST(@scrips) AND {_row_key()} IN UNNEST(@keys) "
+            f"AND trade_date BETWEEN @lo AND @hi")
 
 
 def run_reconcile_scrips(cfg, scrip_mapping, tables=("daily", "intraday"),
@@ -369,22 +396,24 @@ def run_reconcile_scrips(cfg, scrip_mapping, tables=("daily", "intraday"),
             result[name] = {"orphans": orphans, **done}
             continue
 
-        del_sql, upd_sql = _rename_sql(ref, name)
-        for _, r in renamed.iterrows():
-            p = [bigquery.ScalarQueryParameter("old", "STRING", r["scrip"]),
-                 bigquery.ScalarQueryParameter("new", "STRING", r["new_scrip"]),
-                 bigquery.ScalarQueryParameter("lo", "DATE", r["first_date"]),
-                 bigquery.ScalarQueryParameter("hi", "DATE", r["last_date"])]
-            done["deleted_overlap"] += _exec(client, del_sql, p, max_bytes) or 0
-            done["renamed"] += _exec(client, upd_sql, p, max_bytes) or 0
+        if not renamed.empty:
+            del_sql, upd_sql = _rename_sql(ref, name)
+            p = [bigquery.ArrayQueryParameter("keys", "STRING", _pair_keys(renamed)),
+                 bigquery.ArrayQueryParameter("olds", "STRING", sorted(set(renamed["scrip"]))),
+                 bigquery.ArrayQueryParameter("news", "STRING", list(renamed["new_scrip"])),
+                 bigquery.ScalarQueryParameter("lo", "DATE", renamed["first_date"].min()),
+                 bigquery.ScalarQueryParameter("hi", "DATE", renamed["last_date"].max())]
+            done["deleted_overlap"] = _exec(client, del_sql, p, max_bytes) or 0
+            done["renamed"] = _exec(client, upd_sql, p, max_bytes) or 0
 
         if not dropped.empty:
             names = sorted(dropped["scrip"].unique().tolist())
             lo, hi = dropped["first_date"].min(), dropped["last_date"].max()
             p = [bigquery.ArrayQueryParameter("scrips", "STRING", names),
+                 bigquery.ArrayQueryParameter("keys", "STRING", _pair_keys(dropped)),
                  bigquery.ScalarQueryParameter("lo", "DATE", lo),
                  bigquery.ScalarQueryParameter("hi", "DATE", hi)]
-            where = "WHERE scrip IN UNNEST(@scrips) AND trade_date BETWEEN @lo AND @hi"
+            where = _dropped_where()
             expected = int(_query(client, f"SELECT COUNT(*) AS n FROM `{ref}` {where}",
                                   p, max_bytes)["n"].iloc[0])
             if archive:
