@@ -30,6 +30,19 @@ FLAG_SCHEMA = [
 ]
 
 
+def keep_adjusted(df, key=DAILY_KEY):
+    """One row per key. Dhan sometimes returns two rows for the same day of a
+    scrip that split: the adjusted row and the old unadjusted one (JSWDULUX 1:10,
+    Nov 2026: 3,786 days, close 333.88 and 3338.8, same volume). Adjustment
+    only lowers past prices, so the lower close is the adjusted row. Keeping
+    the last row instead put the unadjusted prices back on every reload."""
+    if df.empty or not df.duplicated(subset=key).any():
+        return df
+    return (df.sort_values("close", kind="stable")
+              .drop_duplicates(subset=key, keep="first")
+              .sort_index())
+
+
 def ensure_table(client, table_ref, schema):
     try:
         client.get_table(table_ref)
@@ -69,7 +82,7 @@ def upsert_daily(cfg, client, df):
 
     df = df[DAILY_COLS].copy()
     df["security_id"] = df["security_id"].astype(np.int64)
-    df = df.drop_duplicates(subset=DAILY_KEY, keep="last")
+    df = keep_adjusted(df)
 
     client.load_table_from_dataframe(
         df, cfg.staging_ref,

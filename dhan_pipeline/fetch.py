@@ -119,7 +119,12 @@ async def _fetch_one(session, cfg, row, from_date, to_date, failed, rate_limiter
                 df["exchange"] = row["exc_seg"]
                 df["security_id"] = str(row["security_id"])
                 stats["ok"] += 1
-                return df[OUT_COLS]
+                from .bq import keep_adjusted
+                n = len(df)
+                df = keep_adjusted(df[OUT_COLS], key=["trade_date"])
+                if len(df) < n:
+                    stats.setdefault("dup_days", []).append((scrip_name, n - len(df)))
+                return df
 
             if status == 429:  # rate limited
                 if rl_retries >= cfg.max_rate_limit_retries:
@@ -231,6 +236,8 @@ def fetch_ohlcv(cfg, scrip_mapping, from_date, to_date, desc="Fetching", probe="
     n_ok, n_empty, n_err = stats["ok"], stats["empty"], stats["error"]
     print(f"\nAPI: {n_ok} ok / {n_empty + n_err} not loaded "
           f"({n_empty} empty, {n_err} error, {stats['token']} token)")
+    if stats.get("dup_days"):
+        print(f"  two rows a day from Dhan, kept the adjusted (lower) one: {stats['dup_days'][:30]}")
     if n_empty:
         shown = stats["empty_scrips"][:30]
         print(f"  empty (no rows from Dhan): {shown}"
