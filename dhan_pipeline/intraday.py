@@ -15,6 +15,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from .auth import bq_client
+from .future_guard import clip_inclusive_end, today_ist
 
 # ---- Process constants ----
 INTRADAY_URL = "https://api.dhan.co/v2/charts/intraday"
@@ -61,15 +62,19 @@ def build_windows(start_date, n, window_days, step_days, end_date=None):
     build_contiguous_windows for that instead.
     """
     start = datetime.strptime(start_date, DATE_FMT) if isinstance(start_date, str) else start_date
+    # toDate is exclusive: the last toDate that still covers today is today+1 (#997).
+    today = datetime.combine(today_ist(), datetime.min.time())
+    max_to = today + timedelta(days=1)
     if end_date is None:
-        cutoff = datetime.combine(date.today(), datetime.min.time())
+        cutoff = max_to
     else:
         cutoff = datetime.strptime(end_date, DATE_FMT) if isinstance(end_date, str) else end_date
+        cutoff = min(cutoff, max_to)
 
     windows = []
     for i in range(n):
         f = start + timedelta(days=i * step_days)
-        if f > cutoff:
+        if f > cutoff or f > today:
             break
         t = min(f + timedelta(days=window_days), cutoff)
         windows.append((f.strftime(DATE_FMT), t.strftime(DATE_FMT)))
@@ -84,6 +89,7 @@ def build_contiguous_windows(start_date, end_date, window_days):
     """
     start = start_date if isinstance(start_date, date) else datetime.strptime(start_date, DATE_FMT).date()
     end = end_date if isinstance(end_date, date) else datetime.strptime(end_date, DATE_FMT).date()
+    end = clip_inclusive_end(start, end, "build_contiguous_windows")  # #997
     if end < start:
         raise ValueError(f"end_date {end} is before start_date {start}")
 

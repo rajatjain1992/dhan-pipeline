@@ -19,6 +19,7 @@ import requests
 import pandas as pd
 
 from .auth import bq_client
+from .future_guard import clip_to_date
 
 
 class RateLimiter:
@@ -386,7 +387,7 @@ def run_options(cfg, start_date, end_date, nse_csv_path=None,
     rate_limiter = RateLimiter(requests_per_sec)
 
     start = _to_date(start_date)
-    end = _to_date(end_date)
+    end = _to_date(clip_to_date(start, _to_date(end_date), "run_options"))  # #997, end exclusive
 
     expiry_lookup = build_expiry_lookup(nse_csv_path, expiry_codes) if nse_csv_path else {}
     if not nse_csv_path:

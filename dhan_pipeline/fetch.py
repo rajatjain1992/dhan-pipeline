@@ -210,6 +210,8 @@ def fetch_ohlcv(cfg, scrip_mapping, from_date, to_date, desc="Fetching", probe="
     RELIANCE probe is empty. The probe only runs when RELIANCE is in the
     mapping; pass probe=None to skip it.
     """
+    from .future_guard import clip_to_date
+    to_date = clip_to_date(from_date, to_date, "fetch_ohlcv")  # #997
     nest_asyncio.apply()
     failed = []
     all_data = []
